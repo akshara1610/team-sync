@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: teamsync-postgres
+    environment:
+      POSTGRES_USER: teamsync
+      POSTGRES_PASSWORD: teamsync_password
+      POSTGRES_DB: teamsync
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - teamsync-network
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: teamsync-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - teamsync-network
+
+  # LiveKit Server
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: teamsync-livekit
+    command: --dev --bind 0.0.0.0
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
+    networks:
+      - teamsync-network
+
+  # TeamSync API
+  api:
+    build: .
+    container_name: teamsync-api
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+      - livekit
+    volumes:
+      - ./data:/app/data
+      - ./credentials.json:/app/credentials.json
+      - ./token.json:/app/token.json
+    networks:
+      - teamsync-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  teamsync-network:
+    driver: bridge
