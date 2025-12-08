@@ -10,10 +10,11 @@ from chromadb.config import Settings as ChromaSettings
 # LangChain imports
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_chroma import Chroma
-from langchain.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
-from langchain.docstore.document import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.documents import Document
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from src.config import settings
 from src.models.schemas import RAGQuery, RAGResponse, TranscriptData
@@ -52,15 +53,20 @@ class KnowledgeAgentLangChain:
             persist_directory=settings.CHROMA_PERSIST_DIR
         )
 
+        # Create retriever
+        self.retriever = self.vector_store.as_retriever(
+            search_kwargs={"k": settings.KNOWLEDGE_AGENT_TOP_K}
+        )
+
         # Create custom prompt template for RAG
-        self.qa_prompt_template = """You are a helpful AI assistant that answers questions about past meetings.
+        self.qa_prompt = ChatPromptTemplate.from_template("""You are a helpful AI assistant that answers questions about past meetings.
 Use the following context from previous meetings to answer the question accurately.
 If the answer cannot be found in the context, clearly state that you don't have that information.
 
 Context from past meetings:
 {context}
 
-Question: {question}
+Question: {input}
 
 Instructions:
 - Provide a clear, concise answer based only on the context
@@ -68,22 +74,17 @@ Instructions:
 - If you're not certain, express appropriate uncertainty
 - Use bullet points for multiple items
 
-Answer:"""
+Answer:""")
 
-        self.qa_prompt = PromptTemplate(
-            template=self.qa_prompt_template,
-            input_variables=["context", "question"]
-        )
+        # Create RAG chain using LCEL (LangChain Expression Language)
+        def format_docs(docs):
+            return "\n\n".join([doc.page_content for doc in docs])
 
-        # Create RetrievalQA chain
-        self.qa_chain = RetrievalQA.from_chain_type(
-            llm=self.llm,
-            chain_type="stuff",  # "stuff" puts all docs in prompt, "map_reduce" for larger contexts
-            retriever=self.vector_store.as_retriever(
-                search_kwargs={"k": settings.KNOWLEDGE_AGENT_TOP_K}
-            ),
-            chain_type_kwargs={"prompt": self.qa_prompt},
-            return_source_documents=True
+        self.rag_chain = (
+            {"context": self.retriever | format_docs, "input": RunnablePassthrough()}
+            | self.qa_prompt
+            | self.llm
+            | StrOutputParser()
         )
 
         logger.info("Knowledge Agent initialized with LangChain successfully")
@@ -160,19 +161,19 @@ Answer:"""
 
             # Update retriever with custom k if different from default
             if top_k != settings.KNOWLEDGE_AGENT_TOP_K:
-                self.qa_chain.retriever.search_kwargs["k"] = top_k
+                self.retriever.search_kwargs["k"] = top_k
 
             # Add filter if meeting_id specified
             if meeting_id_filter:
-                self.qa_chain.retriever.search_kwargs["filter"] = {
+                self.retriever.search_kwargs["filter"] = {
                     "meeting_id": meeting_id_filter
                 }
 
-            # Run the RetrievalQA chain
-            result = self.qa_chain({"query": query})
+            # Get source documents first
+            source_documents = self.retriever.invoke(query)
 
-            answer = result["result"]
-            source_documents = result.get("source_documents", [])
+            # Run the RAG chain
+            answer = self.rag_chain.invoke(query)
 
             # Build sources from retrieved documents
             sources = []
@@ -195,7 +196,7 @@ Answer:"""
 
             # Reset filters
             if meeting_id_filter:
-                self.qa_chain.retriever.search_kwargs.pop("filter", None)
+                self.retriever.search_kwargs.pop("filter", None)
 
             return RAGResponse(
                 query=query,

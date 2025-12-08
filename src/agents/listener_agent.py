@@ -25,20 +25,32 @@ class ListenerAgent:
         self.segments: List[SpeakerSegment] = []
         self.participants: set = set()
 
-        # Initialize Whisper model
-        logger.info("Loading Whisper model...")
-        self.whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
-
-        # Initialize pyannote diarization pipeline
-        logger.info("Loading speaker diarization model...")
-        self.diarization_pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization",
-            use_auth_token=settings.HF_TOKEN
-        )
+        # Lazy loading - only initialize when needed
+        self.whisper_model = None
+        self.diarization_pipeline = None
 
         # Audio buffer
         self.audio_buffer = []
         self.sample_rate = 16000
+
+        logger.info("Listener Agent initialized (models will load on first use)")
+
+    def _ensure_models_loaded(self):
+        """Lazy load Whisper and diarization models only when needed."""
+        if self.whisper_model is None:
+            logger.info("Loading Whisper model...")
+            self.whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+
+        if self.diarization_pipeline is None and settings.HF_TOKEN:
+            logger.info("Loading speaker diarization model...")
+            try:
+                self.diarization_pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization",
+                    token=settings.HF_TOKEN
+                )
+            except Exception as e:
+                logger.warning(f"Could not load diarization model: {e}. Speaker diarization will be disabled.")
+                self.diarization_pipeline = None
 
     async def join_meeting(self, room_name: str, meeting_id: str, token: str) -> bool:
         """

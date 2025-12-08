@@ -1,22 +1,26 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+"""
+TeamSync FastAPI Application
+Uses LangGraph + MCP orchestration
+"""
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional
 from loguru import logger
+
 from src.config import settings
-from src.orchestrator import MeetingOrchestrator
+from src.orchestrator import TeamSyncOrchestrator
 from src.database.db import init_db
-from src.models.schemas import RAGQuery, CalendarEvent
 
 
-# Initialize FastAPI app
+# Initialize FastAPI
 app = FastAPI(
-    title=settings.APP_NAME,
+    title=f"{settings.APP_NAME} - LangGraph + MCP",
     version=settings.APP_VERSION,
-    description="AI-Powered Meeting Agent for automated transcription, summarization, and task management"
+    description="AI Meeting Agent with LangGraph workflow and MCP tool execution"
 )
 
-# Add CORS middleware
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
@@ -26,15 +30,14 @@ app.add_middleware(
 )
 
 # Initialize orchestrator
-orchestrator = MeetingOrchestrator()
+orchestrator = TeamSyncOrchestrator()
 
 
-# Request/Response Models
+# Request models
 class MeetingStartRequest(BaseModel):
     room_name: str
     meeting_title: str
     access_token: str
-    auto_schedule_followup: bool = True
 
 
 class QueryRequest(BaseModel):
@@ -42,205 +45,88 @@ class QueryRequest(BaseModel):
     top_k: int = 5
 
 
-class HealthResponse(BaseModel):
-    status: str
-    version: str
-
-
-# API Endpoints
+# Endpoints
 
 @app.on_event("startup")
-async def startup_event():
-    """Initialize database on startup."""
-    logger.info("Starting TeamSync API...")
+async def startup():
+    """Initialize database."""
+    logger.info("Starting TeamSync API (LangGraph + MCP)")
     init_db()
-    logger.info("Database initialized")
 
 
-@app.get("/", response_model=HealthResponse)
-async def root():
-    """Health check endpoint."""
-    return HealthResponse(
-        status="healthy",
-        version=settings.APP_VERSION
-    )
-
-
-@app.get("/health", response_model=HealthResponse)
-async def health_check():
-    """Detailed health check."""
-    return HealthResponse(
-        status="healthy",
-        version=settings.APP_VERSION
-    )
+@app.get("/health")
+async def health():
+    """Health check."""
+    return {
+        "status": "healthy",
+        "version": settings.APP_VERSION,
+        "architecture": "LangGraph + MCP"
+    }
 
 
 @app.post("/meetings/start")
-async def start_meeting(
-    request: MeetingStartRequest,
-    background_tasks: BackgroundTasks
-):
+async def start_meeting(request: MeetingStartRequest):
     """
-    Start processing a meeting with full pipeline.
+    Start meeting processing with LangGraph + MCP workflow.
 
-    This endpoint initiates the complete meeting lifecycle:
-    1. Join meeting and transcribe
-    2. Generate and validate summary
-    3. Create Jira tickets
-    4. Schedule follow-up
-    5. Add to knowledge base
+    Workflow:
+    - LangGraph manages state transitions
+    - MCP handles tool execution (Jira, Calendar)
+    - Self-reflection loop for quality
     """
     try:
-        logger.info(f"Starting meeting: {request.meeting_title}")
-
-        # Run pipeline in background
-        result = await orchestrator.process_meeting_full_pipeline(
+        result = await orchestrator.process_meeting(
             room_name=request.room_name,
             meeting_title=request.meeting_title,
-            access_token=request.access_token,
-            auto_schedule_followup=request.auto_schedule_followup
+            access_token=request.access_token
         )
-
         return result
 
     except Exception as e:
-        logger.error(f"Error starting meeting: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/meetings/{meeting_id}")
-async def get_meeting(meeting_id: str):
-    """Get meeting details by ID."""
-    try:
-        result = orchestrator.get_meeting_summary(meeting_id)
-
-        if "error" in result:
-            raise HTTPException(status_code=404, detail=result["error"])
-
-        return result
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting meeting: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/meetings")
-async def list_meetings(limit: int = 50):
-    """List all meetings."""
-    try:
-        meetings = orchestrator.get_all_meetings(limit=limit)
-        return {"meetings": meetings, "count": len(meetings)}
-
-    except Exception as e:
-        logger.error(f"Error listing meetings: {e}")
+        logger.error(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/knowledge/query")
 async def query_knowledge(request: QueryRequest):
-    """
-    Query the knowledge base about past meetings.
-
-    Uses RAG (Retrieval-Augmented Generation) to find relevant information
-    from historical meeting transcripts.
-    """
+    """Query knowledge base via MCP."""
     try:
-        result = await orchestrator.query_knowledge_base(
-            query=request.query,
-            top_k=request.top_k
-        )
-
+        result = await orchestrator.query_knowledge(request.query, request.top_k)
         return result
 
     except Exception as e:
-        logger.error(f"Error querying knowledge base: {e}")
+        logger.error(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/knowledge/stats")
-async def knowledge_stats():
-    """Get knowledge base statistics."""
-    try:
-        stats = orchestrator.knowledge_agent.get_collection_stats()
-        return stats
-
-    except Exception as e:
-        logger.error(f"Error getting knowledge stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/mcp/tools")
+async def list_mcp_tools():
+    """List all MCP tools."""
+    return {"tools": orchestrator.mcp_server.list_tools()}
 
 
-@app.post("/calendar/schedule")
-async def schedule_event(event: CalendarEvent):
-    """Schedule a new calendar event."""
-    try:
-        result = orchestrator.scheduler_agent.schedule_event(event)
-
-        if result.get("status") == "failed":
-            raise HTTPException(status_code=500, detail=result.get("error"))
-
-        return result
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error scheduling event: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/mcp/audit")
+async def get_mcp_audit():
+    """Get MCP audit log."""
+    return {"audit_log": orchestrator.mcp_server.get_audit_log()}
 
 
-@app.get("/calendar/upcoming")
-async def get_upcoming_events(max_results: int = 10):
-    """Get upcoming calendar events."""
-    try:
-        events = orchestrator.scheduler_agent.get_upcoming_events(
-            max_results=max_results
-        )
-        return {"events": events, "count": len(events)}
-
-    except Exception as e:
-        logger.error(f"Error getting upcoming events: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/jira/tickets")
-async def get_jira_tickets(meeting_id: Optional[str] = None):
-    """Get Jira tickets, optionally filtered by meeting."""
-    try:
-        tickets = orchestrator.action_agent.get_project_tickets(
-            meeting_id=meeting_id
-        )
-        return {"tickets": tickets, "count": len(tickets)}
-
-    except Exception as e:
-        logger.error(f"Error getting Jira tickets: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/jira/tickets/{ticket_key}")
-async def get_jira_ticket(ticket_key: str):
-    """Get details of a specific Jira ticket."""
-    try:
-        ticket = orchestrator.action_agent.get_ticket_info(ticket_key)
-
-        if not ticket:
-            raise HTTPException(status_code=404, detail="Ticket not found")
-
-        return ticket
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting Jira ticket: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/workflow/info")
+async def workflow_info():
+    """Get LangGraph workflow information."""
+    return {
+        "workflow": "LangGraph State Machine",
+        "nodes": ["listen", "summarize", "reflect", "improve", "execute_actions", "schedule_followup", "store_knowledge"],
+        "mcp_tools": [t["name"] for t in orchestrator.mcp_server.list_tools()],
+        "features": [
+            "Stateful workflow execution",
+            "Self-reflection loop",
+            "MCP tool integration",
+            "Automatic audit logging"
+        ]
+    }
 
 
 if __name__ == "__main__":
     import uvicorn
-
-    uvicorn.run(
-        "main:app",
-        host=settings.API_HOST,
-        port=settings.API_PORT,
-        reload=settings.DEBUG
-    )
+    uvicorn.run(app, host=settings.API_HOST, port=settings.API_PORT)

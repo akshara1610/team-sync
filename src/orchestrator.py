@@ -1,69 +1,357 @@
-from typing import Dict, Any
-import uuid
+"""
+Unified TeamSync Orchestrator
+Combines LangGraph state machine workflow with MCP tool execution.
+
+This is the main orchestrator - uses both LangGraph and MCP.
+"""
+from typing import Dict, Any, TypedDict, Annotated, Sequence
+import operator
 from datetime import datetime
+import uuid
+import asyncio
 from loguru import logger
+
+# LangGraph
+from langgraph.graph import StateGraph, END
+from langchain_core.messages import BaseMessage, HumanMessage
+
+# Agents
 from src.agents.listener_agent import ListenerAgent
-from src.agents.knowledge_agent import KnowledgeAgent
+from src.agents.knowledge_agent_langchain import KnowledgeAgentLangChain
 from src.agents.summarizer_agent import SummarizerAgent
 from src.agents.reflection_agent import SelfReflectionAgent
-from src.agents.action_agent import ActionAgent
+from src.agents.action_agent_mcp import ActionAgentMCP
 from src.agents.scheduler_agent import SchedulerAgent
-from src.models.schemas import MeetingRecord, MeetingStatus
+
+# MCP
+from src.mcp.mcp_server import MCPServer, CalendarTool, KnowledgeBaseTool
+
+# Database
+from src.models.schemas import MeetingStatus
 from src.database.db import SessionLocal, Meeting
 
 
-class MeetingOrchestrator:
+class MeetingState(TypedDict):
+    """LangGraph state for meeting workflow."""
+    meeting_id: str
+    meeting_title: str
+    room_name: str
+    start_time: datetime
+    status: str
+    transcript: Dict[str, Any]
+    transcript_path: str
+    initial_summary: Dict[str, Any]
+    reflection_feedback: Dict[str, Any]
+    final_summary: Dict[str, Any]
+    summary_path: str
+    jira_tickets: list
+    followup_meeting: Dict[str, Any]
+    messages: Annotated[Sequence[BaseMessage], operator.add]
+    validation_passed: bool
+    reflection_iterations: int
+    errors: list
+    mcp_audit_log: list
+
+
+def _run_async(coro):
+    """Helper to run async functions from sync context."""
+    try:
+        loop = asyncio.get_running_loop()
+        # There's already a running loop - this shouldn't happen in LangGraph nodes
+        # Create a new task and wait for it
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            return executor.submit(asyncio.run, coro).result()
+    except RuntimeError:
+        # No event loop running, safe to use asyncio.run()
+        return asyncio.run(coro)
+
+
+class TeamSyncOrchestrator:
     """
-    Main orchestrator that coordinates all agents in the TeamSync system.
-    Manages the complete meeting lifecycle from joining to post-processing.
+    Main TeamSync Orchestrator using LangGraph + MCP.
+
+    Architecture:
+    - LangGraph: State machine workflow coordination
+    - MCP: Standardized tool execution (Jira, Calendar, Knowledge)
+    - 6 Agents: Listener, Knowledge, Summarizer, Reflection, Action, Scheduler
     """
 
     def __init__(self):
-        logger.info("Initializing Meeting Orchestrator...")
+        logger.info("=" * 60)
+        logger.info("Initializing TeamSync Orchestrator")
+        logger.info("Architecture: LangGraph + MCP")
+        logger.info("=" * 60)
+
+        # Initialize MCP Server
+        self.mcp_server = MCPServer()
 
         # Initialize all agents
         self.listener_agent = ListenerAgent()
-        self.knowledge_agent = KnowledgeAgent()
+        self.knowledge_agent = KnowledgeAgentLangChain()
         self.summarizer_agent = SummarizerAgent()
         self.reflection_agent = SelfReflectionAgent()
-        self.action_agent = ActionAgent()
+        self.action_agent = ActionAgentMCP(self.mcp_server)
         self.scheduler_agent = SchedulerAgent()
 
-        logger.info("All agents initialized successfully")
+        # Register MCP tools
+        self._register_mcp_tools()
 
-    async def process_meeting_full_pipeline(
+        # Build LangGraph workflow
+        self.workflow = self._build_langgraph_workflow()
+        self.app = self.workflow.compile()
+
+        logger.info("✓ All agents initialized")
+        logger.info(f"✓ MCP tools: {[t['name'] for t in self.mcp_server.list_tools()]}")
+        logger.info(f"✓ LangGraph workflow compiled")
+        logger.info("=" * 60)
+
+    def _register_mcp_tools(self):
+        """Register tools with MCP server."""
+        calendar_tool = CalendarTool(self.scheduler_agent.service)
+        self.mcp_server.register_tool(calendar_tool)
+
+        knowledge_tool = KnowledgeBaseTool(self.knowledge_agent)
+        self.mcp_server.register_tool(knowledge_tool)
+
+    def _build_langgraph_workflow(self) -> StateGraph:
+        """Build LangGraph state machine workflow."""
+        workflow = StateGraph(MeetingState)
+
+        # Add nodes
+        workflow.add_node("listen", self._listen_node)
+        workflow.add_node("summarize", self._summarize_node)
+        workflow.add_node("reflect", self._reflect_node)
+        workflow.add_node("improve", self._improve_node)
+        workflow.add_node("execute_actions", self._action_node)
+        workflow.add_node("schedule_followup", self._schedule_node)
+        workflow.add_node("store_knowledge", self._store_node)
+
+        # Define edges
+        workflow.set_entry_point("listen")
+        workflow.add_edge("listen", "summarize")
+        workflow.add_edge("summarize", "reflect")
+
+        # Conditional: reflection passes or needs improvement
+        workflow.add_conditional_edges(
+            "reflect",
+            self._should_improve,
+            {"improve": "improve", "continue": "execute_actions"}
+        )
+
+        workflow.add_edge("improve", "reflect")
+        workflow.add_edge("execute_actions", "schedule_followup")
+        workflow.add_edge("schedule_followup", "store_knowledge")
+        workflow.add_edge("store_knowledge", END)
+
+        return workflow
+
+    # LangGraph node implementations
+
+    def _listen_node(self, state: MeetingState) -> Dict[str, Any]:
+        """Node 1: Transcribe meeting."""
+        logger.info(f"[LangGraph] Node: LISTEN - Meeting {state['meeting_id']}")
+
+        try:
+            transcript = self.listener_agent.get_transcript(
+                state["meeting_title"],
+                state["start_time"]
+            )
+
+            transcript_path = f"data/transcripts/{state['meeting_id']}.json"
+            self.listener_agent.save_transcript(transcript_path)
+
+            return {
+                "transcript": transcript.model_dump(),
+                "transcript_path": transcript_path,
+                "messages": [HumanMessage(content=f"Transcribed {len(transcript.segments)} segments")],
+                "status": "transcribed"
+            }
+
+        except Exception as e:
+            logger.error(f"Listen node error: {e}")
+            return {"errors": [f"Listen error: {str(e)}"], "status": "failed"}
+
+    def _summarize_node(self, state: MeetingState) -> Dict[str, Any]:
+        """Node 2: Generate summary."""
+        logger.info(f"[LangGraph] Node: SUMMARIZE")
+
+        try:
+            from src.models.schemas import TranscriptData
+            transcript = TranscriptData(**state["transcript"])
+            summary = self.summarizer_agent.generate_summary(transcript)
+
+            return {
+                "initial_summary": summary.model_dump(),
+                "messages": [HumanMessage(content=f"Generated summary with {len(summary.action_items)} actions")],
+                "status": "summarized"
+            }
+
+        except Exception as e:
+            logger.error(f"Summarize node error: {e}")
+            return {"errors": [f"Summarize error: {str(e)}"], "status": "failed"}
+
+    def _reflect_node(self, state: MeetingState) -> Dict[str, Any]:
+        """Node 3: Self-reflection validation."""
+        logger.info(f"[LangGraph] Node: REFLECT - Iteration {state.get('reflection_iterations', 0) + 1}")
+
+        try:
+            from src.models.schemas import MeetingSummary, TranscriptData
+
+            summary_dict = state.get("final_summary", state["initial_summary"])
+            summary = MeetingSummary(**summary_dict)
+            transcript = TranscriptData(**state["transcript"])
+
+            feedback, improved_summary = self.reflection_agent.validate_summary(summary, transcript)
+            iterations = state.get("reflection_iterations", 0) + 1
+
+            return {
+                "reflection_feedback": feedback.model_dump(),
+                "final_summary": improved_summary.model_dump(),
+                "validation_passed": feedback.approved,
+                "reflection_iterations": iterations,
+                "messages": [HumanMessage(
+                    content=f"Reflection {iterations}: {'PASSED' if feedback.approved else 'NEEDS IMPROVEMENT'}"
+                )]
+            }
+
+        except Exception as e:
+            logger.error(f"Reflect node error: {e}")
+            return {"errors": [f"Reflect error: {str(e)}"], "status": "failed"}
+
+    def _improve_node(self, state: MeetingState) -> Dict[str, Any]:
+        """Node 4: Improvement step."""
+        logger.info(f"[LangGraph] Node: IMPROVE")
+        return {"messages": [HumanMessage(content="Summary improved")]}
+
+    def _action_node(self, state: MeetingState) -> Dict[str, Any]:
+        """Node 5: Create Jira tickets via MCP."""
+        logger.info(f"[LangGraph] Node: ACTION (via MCP)")
+
+        try:
+            from src.models.schemas import MeetingSummary
+            summary = MeetingSummary(**state["final_summary"])
+
+            summary_path = f"data/summaries/{state['meeting_id']}.json"
+            self.summarizer_agent.save_summary(summary, summary_path)
+
+            # Create tickets via MCP
+            jira_tickets = []
+            if summary.action_items:
+                jira_tickets = _run_async(self.action_agent.create_jira_tickets(
+                    summary.action_items,
+                    state["meeting_title"],
+                    state["meeting_id"]
+                ))
+
+            return {
+                "summary_path": summary_path,
+                "jira_tickets": jira_tickets,
+                "messages": [HumanMessage(content=f"Created {len(jira_tickets)} Jira tickets via MCP")]
+            }
+
+        except Exception as e:
+            logger.error(f"Action node error: {e}")
+            return {"jira_tickets": [], "errors": [f"Action error: {str(e)}"]}
+
+    def _schedule_node(self, state: MeetingState) -> Dict[str, Any]:
+        """Node 6: Schedule follow-up via MCP."""
+        logger.info(f"[LangGraph] Node: SCHEDULE (via MCP)")
+
+        try:
+            from src.models.schemas import MeetingSummary
+            summary = MeetingSummary(**state["final_summary"])
+
+            followup = None
+            if summary.action_items or summary.unresolved_questions:
+                # Use MCP calendar tool - schedule for next week
+                from datetime import timedelta
+                start_time = datetime.utcnow() + timedelta(days=7)
+                end_time = start_time + timedelta(hours=1)
+
+                result = _run_async(self.mcp_server.execute_tool(
+                    "calendar_create_event",
+                    {
+                        "summary": f"Follow-up: {state['meeting_title']}",
+                        "description": f"Follow-up for {state['meeting_title']}",
+                        "start_time": start_time.isoformat(),
+                        "end_time": end_time.isoformat(),
+                        "attendees": summary.participants
+                    }
+                ))
+
+                if result.get("success"):
+                    followup = result
+
+            return {
+                "followup_meeting": followup or {},
+                "messages": [HumanMessage(content="Follow-up scheduled via MCP" if followup else "No follow-up needed")]
+            }
+
+        except Exception as e:
+            logger.error(f"Schedule node error: {e}")
+            return {"followup_meeting": {}, "errors": [f"Schedule error: {str(e)}"]}
+
+    def _store_node(self, state: MeetingState) -> Dict[str, Any]:
+        """Node 7: Store in knowledge base."""
+        logger.info(f"[LangGraph] Node: STORE")
+
+        try:
+            from src.models.schemas import TranscriptData
+            transcript = TranscriptData(**state["transcript"])
+            self.knowledge_agent.add_transcript(transcript)
+
+            # Update database
+            db = SessionLocal()
+            meeting = db.query(Meeting).filter(Meeting.id == state["meeting_id"]).first()
+            if meeting:
+                meeting.transcript_path = state["transcript_path"]
+                meeting.summary_path = state["summary_path"]
+                meeting.status = MeetingStatus.COMPLETED
+                meeting.end_time = datetime.utcnow()
+                db.commit()
+            db.close()
+
+            # Get MCP audit log
+            audit_log = self.mcp_server.get_audit_log()
+
+            return {
+                "mcp_audit_log": audit_log,
+                "messages": [HumanMessage(content=f"Knowledge stored. MCP calls: {len(audit_log)}")]
+            }
+
+        except Exception as e:
+            logger.error(f"Store node error: {e}")
+            return {"errors": [f"Store error: {str(e)}"]}
+
+    def _should_improve(self, state: MeetingState) -> str:
+        """Conditional edge: improve or continue."""
+        if state.get("validation_passed", False):
+            return "continue"
+        if state.get("reflection_iterations", 0) >= 3:
+            logger.warning("Max reflection iterations reached")
+            return "continue"
+        return "improve"
+
+    # Public API
+
+    async def process_meeting(
         self,
         room_name: str,
         meeting_title: str,
-        access_token: str,
-        auto_schedule_followup: bool = True
+        access_token: str
     ) -> Dict[str, Any]:
         """
-        Execute the complete meeting pipeline.
+        Process a meeting through LangGraph + MCP workflow.
 
-        Pipeline stages:
-        1. Join meeting and transcribe (Listener Agent)
-        2. Generate summary (Summarizer Agent)
-        3. Validate and improve (Self-Reflection Agent)
-        4. Create Jira tickets (Action Agent)
-        5. Schedule follow-up (Scheduler Agent)
-        6. Store in knowledge base (Knowledge Agent)
-
-        Args:
-            room_name: LiveKit room name
-            meeting_title: Title of the meeting
-            access_token: LiveKit access token
-            auto_schedule_followup: Whether to auto-schedule follow-up
-
-        Returns:
-            Complete pipeline results
+        Returns complete results with MCP audit log.
         """
         meeting_id = str(uuid.uuid4())
         start_time = datetime.utcnow()
 
-        logger.info(f"Starting full pipeline for meeting: {meeting_id}")
+        logger.info(f"Starting LangGraph + MCP workflow for: {meeting_id}")
 
-        # Create database record
+        # Create DB record
         db = SessionLocal()
         meeting_record = Meeting(
             id=meeting_id,
@@ -74,205 +362,63 @@ class MeetingOrchestrator:
         )
         db.add(meeting_record)
         db.commit()
+        db.close()
 
+        # Join meeting
+        await self.listener_agent.join_meeting(room_name, meeting_id, access_token)
+
+        # Initialize state
+        initial_state = MeetingState(
+            meeting_id=meeting_id,
+            meeting_title=meeting_title,
+            room_name=room_name,
+            start_time=start_time,
+            status="initialized",
+            transcript={},
+            transcript_path="",
+            initial_summary={},
+            reflection_feedback={},
+            final_summary={},
+            summary_path="",
+            jira_tickets=[],
+            followup_meeting={},
+            messages=[],
+            validation_passed=False,
+            reflection_iterations=0,
+            errors=[],
+            mcp_audit_log=[]
+        )
+
+        # Run LangGraph workflow
         try:
-            # Stage 1: Join meeting and transcribe
-            logger.info("Stage 1: Joining meeting and transcribing...")
-            join_success = await self.listener_agent.join_meeting(
-                room_name,
-                meeting_id,
-                access_token
-            )
+            final_state = self.app.invoke(initial_state)
 
-            if not join_success:
-                raise Exception("Failed to join meeting")
-
-            # Note: In real implementation, this would run continuously
-            # For demo purposes, we'll simulate waiting for meeting to end
-            # await asyncio.sleep(meeting_duration)
-
-            # Get transcript
-            transcript = self.listener_agent.get_transcript(meeting_title, start_time)
-            transcript_path = f"data/transcripts/{meeting_id}.json"
-            self.listener_agent.save_transcript(transcript_path)
-
-            meeting_record.transcript_path = transcript_path
-            meeting_record.participants = transcript.participants
-            meeting_record.status = MeetingStatus.PROCESSING
-            db.commit()
-
-            # Stage 2: Generate summary
-            logger.info("Stage 2: Generating meeting summary...")
-            initial_summary = self.summarizer_agent.generate_summary(transcript)
-
-            # Stage 3: Validate and improve with self-reflection
-            logger.info("Stage 3: Validating summary with self-reflection...")
-            reflection_feedback, final_summary = self.reflection_agent.validate_summary(
-                initial_summary,
-                transcript
-            )
-
-            # Save final summary
-            summary_path = f"data/summaries/{meeting_id}.json"
-            self.summarizer_agent.save_summary(final_summary, summary_path)
-            meeting_record.summary_path = summary_path
-
-            # Stage 4: Create Jira tickets
-            logger.info("Stage 4: Creating Jira tickets for action items...")
-            jira_tickets = []
-            if final_summary.action_items:
-                jira_tickets = self.action_agent.create_jira_tickets(
-                    final_summary.action_items,
-                    meeting_title,
-                    meeting_id
-                )
-
-            # Stage 5: Schedule follow-up meeting
-            logger.info("Stage 5: Scheduling follow-up meeting...")
-            followup_event = None
-            if auto_schedule_followup and (final_summary.action_items or final_summary.unresolved_questions):
-                followup_event = self.scheduler_agent.schedule_follow_up_meeting(
-                    final_summary,
-                    days_ahead=7
-                )
-
-            # Stage 6: Store in knowledge base
-            logger.info("Stage 6: Adding transcript to knowledge base...")
-            self.knowledge_agent.add_transcript(transcript)
-
-            # Update meeting record
-            meeting_record.end_time = datetime.utcnow()
-            meeting_record.status = MeetingStatus.COMPLETED
-            db.commit()
-
-            logger.info(f"Pipeline completed successfully for meeting: {meeting_id}")
+            logger.info("✓ LangGraph + MCP workflow completed")
 
             return {
                 "meeting_id": meeting_id,
                 "status": "success",
-                "transcript": {
-                    "path": transcript_path,
-                    "segments_count": len(transcript.segments),
-                    "participants": transcript.participants
-                },
-                "summary": {
-                    "path": summary_path,
-                    "executive_summary": final_summary.executive_summary,
-                    "key_decisions_count": len(final_summary.key_decisions),
-                    "action_items_count": len(final_summary.action_items),
-                    "discussion_points_count": len(final_summary.discussion_points)
-                },
-                "reflection": {
-                    "approved": reflection_feedback.approved,
-                    "coherence_score": reflection_feedback.logical_coherence_score,
-                    "issues_count": len(reflection_feedback.consistency_issues) + len(reflection_feedback.missing_action_items)
-                },
-                "jira_tickets": jira_tickets,
-                "followup_meeting": followup_event,
-                "processing_time_seconds": (datetime.utcnow() - start_time).total_seconds()
+                "transcript_path": final_state.get("transcript_path"),
+                "summary_path": final_state.get("summary_path"),
+                "jira_tickets": final_state.get("jira_tickets", []),
+                "followup_meeting": final_state.get("followup_meeting", {}),
+                "reflection_iterations": final_state.get("reflection_iterations", 0),
+                "mcp_audit_log": final_state.get("mcp_audit_log", []),
+                "workflow_messages": [msg.content for msg in final_state.get("messages", [])],
+                "errors": final_state.get("errors", [])
             }
 
         except Exception as e:
-            logger.error(f"Error in pipeline: {e}")
-            meeting_record.status = MeetingStatus.FAILED
-            db.commit()
-
-            return {
-                "meeting_id": meeting_id,
-                "status": "failed",
-                "error": str(e)
-            }
+            logger.error(f"Workflow failed: {e}")
+            return {"meeting_id": meeting_id, "status": "failed", "error": str(e)}
 
         finally:
-            db.close()
             await self.listener_agent.leave_meeting()
 
-    async def query_knowledge_base(
-        self,
-        query: str,
-        top_k: int = 5
-    ) -> Dict[str, Any]:
-        """
-        Query the knowledge base for past meeting information.
-
-        Args:
-            query: Natural language query
-            top_k: Number of results to return
-
-        Returns:
-            Query results
-        """
-        logger.info(f"Querying knowledge base: {query}")
-
-        response = self.knowledge_agent.query(query, top_k)
-
-        return {
-            "query": response.query,
-            "answer": response.answer,
-            "confidence": response.confidence,
-            "sources": response.sources
-        }
-
-    def get_meeting_summary(self, meeting_id: str) -> Dict[str, Any]:
-        """
-        Get summary for a specific meeting.
-
-        Args:
-            meeting_id: Meeting identifier
-
-        Returns:
-            Meeting summary information
-        """
-        db = SessionLocal()
-        try:
-            meeting = db.query(Meeting).filter(Meeting.id == meeting_id).first()
-
-            if not meeting:
-                return {"error": "Meeting not found"}
-
-            return {
-                "meeting_id": meeting.id,
-                "title": meeting.title,
-                "status": meeting.status.value,
-                "start_time": meeting.start_time.isoformat(),
-                "end_time": meeting.end_time.isoformat() if meeting.end_time else None,
-                "participants": meeting.participants,
-                "transcript_path": meeting.transcript_path,
-                "summary_path": meeting.summary_path
-            }
-
-        finally:
-            db.close()
-
-    def get_all_meetings(
-        self,
-        limit: int = 50
-    ) -> list[Dict[str, Any]]:
-        """
-        Get all meetings from database.
-
-        Args:
-            limit: Maximum number of meetings to return
-
-        Returns:
-            List of meeting records
-        """
-        db = SessionLocal()
-        try:
-            meetings = db.query(Meeting).order_by(
-                Meeting.created_at.desc()
-            ).limit(limit).all()
-
-            return [
-                {
-                    "meeting_id": m.id,
-                    "title": m.title,
-                    "status": m.status.value,
-                    "start_time": m.start_time.isoformat(),
-                    "participants": m.participants
-                }
-                for m in meetings
-            ]
-
-        finally:
-            db.close()
+    async def query_knowledge(self, query: str, top_k: int = 5) -> Dict[str, Any]:
+        """Query knowledge base via MCP."""
+        result = await self.mcp_server.execute_tool(
+            "knowledge_query",
+            {"query": query, "top_k": top_k}
+        )
+        return result
