@@ -35,6 +35,7 @@ class ActionAgentMCP:
         )
 
         # Register Jira tool with MCP server
+        # Participants will be provided via MCP context at runtime
         jira_tool = JiraTool(self.jira_client)
         self.mcp_server.register_tool(jira_tool)
 
@@ -64,6 +65,11 @@ class ActionAgentMCP:
         created_tickets = []
 
         for action_item in action_items:
+            # Skip action items that are actually meetings (should go to Calendar instead)
+            if self._is_meeting_action(action_item):
+                logger.info(f"[MCP] Skipping meeting action item (should be in Calendar): {action_item.title}")
+                continue
+
             try:
                 logger.info(f"[MCP] Creating ticket for: {action_item.title}")
 
@@ -99,13 +105,33 @@ class ActionAgentMCP:
                 )
 
                 if result.get("success"):
-                    created_tickets.append({
-                        "action_item": action_item.title,
-                        "status": "created",
-                        "ticket_key": result["ticket_key"],
-                        "ticket_url": result["ticket_url"],
-                        "assignee": action_item.assignee
-                    })
+                    # Handle multiple tickets (when assignee is "Everyone" or "All team members")
+                    if "tickets" in result:
+                        for ticket in result["tickets"]:
+                            if ticket.get("success"):
+                                created_tickets.append({
+                                    "action_item": action_item.title,
+                                    "status": "created",
+                                    "ticket_key": ticket["ticket_key"],
+                                    "ticket_url": ticket["ticket_url"],
+                                    "assignee": ticket.get("assignee", action_item.assignee)
+                                })
+                            else:
+                                created_tickets.append({
+                                    "action_item": action_item.title,
+                                    "status": "failed",
+                                    "error": ticket.get("error"),
+                                    "assignee": ticket.get("assignee", action_item.assignee)
+                                })
+                    else:
+                        # Single ticket
+                        created_tickets.append({
+                            "action_item": action_item.title,
+                            "status": "created",
+                            "ticket_key": result["ticket_key"],
+                            "ticket_url": result["ticket_url"],
+                            "assignee": result.get("assignee", action_item.assignee)
+                        })
                 else:
                     created_tickets.append({
                         "action_item": action_item.title,
@@ -124,6 +150,33 @@ class ActionAgentMCP:
         logger.info(f"[MCP] Created {len([t for t in created_tickets if t.get('status') == 'created'])} tickets")
 
         return created_tickets
+
+    def _is_meeting_action(self, action_item: ActionItem) -> bool:
+        """
+        Determine if an action item is actually a meeting (should go to Calendar).
+
+        Returns:
+            True if this is a meeting action, False if it's a task action
+        """
+        meeting_keywords = [
+            "attend meeting",
+            "join meeting",
+            "meeting on",
+            "schedule meeting",
+            "mandatory meeting",
+            "attend session",
+            "participate in meeting"
+        ]
+
+        title_lower = action_item.title.lower()
+        desc_lower = action_item.description.lower()
+
+        # Check if title or description contains meeting keywords
+        for keyword in meeting_keywords:
+            if keyword in title_lower or keyword in desc_lower:
+                return True
+
+        return False
 
     def _build_ticket_description(
         self,

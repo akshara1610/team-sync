@@ -240,9 +240,33 @@ async def main():
             transcript = None
 
     if not transcript:
-        # No recording or processing failed - use mock transcript
-        print("\n📝 Using mock transcript for demo...")
-        transcript = create_mock_transcript(participants)
+        # No recording or processing failed - load existing transcript
+        print("\n📝 Loading existing transcript: gmeet_20251209_022911.json")
+
+        import json
+        transcript_path = Path("data/transcripts/gmeet_20251209_022911.json")
+
+        if transcript_path.exists():
+            with open(transcript_path, 'r') as f:
+                transcript_data = json.load(f)
+
+            # Convert to TranscriptData
+            segments = [
+                SpeakerSegment(**seg) for seg in transcript_data['segments']
+            ]
+
+            transcript = TranscriptData(
+                meeting_id=transcript_data['meeting_id'],
+                meeting_title="Training Completion Meeting - BEI & Post Training",
+                start_time=datetime.now() - timedelta(minutes=2),
+                end_time=datetime.now(),
+                segments=segments,
+                participants=transcript_data.get('participants', participants)
+            )
+            print(f"✅ Loaded transcript with {len(segments)} segments")
+        else:
+            print("⚠️  Transcript file not found, using mock transcript...")
+            transcript = create_mock_transcript(participants)
 
     print(f"\n✅ Transcript ready:")
     print(f"   • Meeting: {transcript.meeting_title}")

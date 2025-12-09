@@ -4,7 +4,6 @@ import time
 import re
 from datetime import datetime
 from loguru import logger
-import google.generativeai as genai
 from src.config import settings
 from src.models.schemas import (
     TranscriptData,
@@ -21,9 +20,20 @@ class SummarizerAgent:
     """
 
     def __init__(self):
-        genai.configure(api_key=settings.GOOGLE_API_KEY)
-        self.model = genai.GenerativeModel(settings.SUMMARIZER_MODEL)
-        logger.info(f"Summarizer Agent initialized with Gemini model: {settings.SUMMARIZER_MODEL}")
+        self.llm_provider = settings.LLM_PROVIDER
+        self.model_name = settings.SUMMARIZER_MODEL
+
+        if self.llm_provider == "openai":
+            from openai import OpenAI
+            self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
+            logger.info(f"Summarizer Agent initialized with OpenAI model: {self.model_name}")
+        elif self.llm_provider == "gemini":
+            import google.generativeai as genai
+            genai.configure(api_key=settings.GOOGLE_API_KEY)
+            self.model = genai.GenerativeModel(self.model_name)
+            logger.info(f"Summarizer Agent initialized with Gemini model: {self.model_name}")
+        else:
+            raise ValueError(f"Unsupported LLM provider: {self.llm_provider}")
 
     def generate_summary(self, transcript: TranscriptData) -> MeetingSummary:
         """
@@ -88,11 +98,20 @@ class SummarizerAgent:
             raise
 
     def _call_llm(self, prompt: str, max_retries: int = 3) -> str:
-        """Helper method to call Gemini with rate limit handling."""
+        """Helper method to call LLM with rate limit handling."""
         for attempt in range(max_retries):
             try:
-                response = self.model.generate_content(prompt)
-                return response.text.strip()
+                if self.llm_provider == "openai":
+                    response = self.client.chat.completions.create(
+                        model=self.model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.7,
+                        max_tokens=2000
+                    )
+                    return response.choices[0].message.content.strip()
+                elif self.llm_provider == "gemini":
+                    response = self.model.generate_content(prompt)
+                    return response.text.strip()
             except Exception as e:
                 error_str = str(e)
                 if "429" in error_str or "quota" in error_str.lower() or "rate" in error_str.lower():

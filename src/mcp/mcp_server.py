@@ -32,12 +32,64 @@ class MCPTool:
 class JiraTool(MCPTool):
     """MCP tool for Jira integration."""
 
-    def __init__(self, jira_client):
+    def __init__(self, jira_client, participants: Optional[List[str]] = None):
         super().__init__(
             name="jira_create_ticket",
             description="Create a Jira ticket with title, description, assignee, and priority"
         )
         self.jira_client = jira_client
+        self.participants = participants or []
+
+        # Name to email mapping
+        self.name_mapping = {
+            "vrinda": "vva2113@columbia.edu",
+            "akshara": "ap4613@columbia.edu",
+            # Add more mappings as needed
+        }
+
+    def _resolve_assignee(self, assignee_str: str) -> List[str]:
+        """
+        Resolve assignee string to list of email addresses.
+
+        Handles:
+        - "All team members" -> all participants
+        - First name (e.g., "Vrinda") -> mapped email
+        - Direct email -> single email
+
+        Returns:
+            List of email addresses
+        """
+        if not assignee_str:
+            return []
+
+        assignee_lower = assignee_str.lower().strip()
+
+        # Handle "All team members" or similar
+        if "all" in assignee_lower or "everyone" in assignee_lower or "team" in assignee_lower:
+            logger.info(f"[MCP] Assignee '{assignee_str}' maps to all participants: {self.participants}")
+            return self.participants
+
+        # Check name mapping (case-insensitive)
+        if assignee_lower in self.name_mapping:
+            email = self.name_mapping[assignee_lower]
+            logger.info(f"[MCP] Mapped name '{assignee_str}' to {email}")
+            return [email]
+
+        # Check if it's already an email
+        if "@" in assignee_str:
+            return [assignee_str]
+
+        # Try to find partial match in participants
+        for participant in self.participants:
+            # Extract first name from email (before @)
+            participant_name = participant.split('@')[0].lower()
+            if assignee_lower in participant_name or participant_name in assignee_lower:
+                logger.info(f"[MCP] Matched '{assignee_str}' to participant {participant}")
+                return [participant]
+
+        # If no match, return as-is (will be handled by JIRA search)
+        logger.warning(f"[MCP] Could not map assignee '{assignee_str}' to participant")
+        return [assignee_str]
 
     async def execute(self, parameters: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -46,10 +98,63 @@ class JiraTool(MCPTool):
         Parameters:
             - summary (str): Ticket title
             - description (str): Ticket description
-            - assignee (str, optional): Assignee email/username
+            - assignee (str, optional): Assignee email/username/name or "All team members"
             - priority (str): Priority level (High/Medium/Low)
             - project_key (str): Jira project key
         """
+        try:
+            # Get participants from context if available
+            context = parameters.get("_context", {})
+            if context.get("participants"):
+                self.participants = context["participants"]
+                logger.info(f"[MCP] Using participants from context: {self.participants}")
+
+            assignee_str = parameters.get("assignee", "")
+            assignee_emails = self._resolve_assignee(assignee_str)
+
+            # If multiple assignees (e.g., "All team members"), create multiple tickets
+            if len(assignee_emails) > 1:
+                logger.info(f"[MCP] Creating {len(assignee_emails)} tickets (one per assignee)")
+                created_tickets = []
+
+                for assignee_email in assignee_emails:
+                    result = await self._create_single_ticket(
+                        parameters=parameters,
+                        assignee_email=assignee_email
+                    )
+                    created_tickets.append(result)
+
+                # Return consolidated result
+                successful = [t for t in created_tickets if t.get("success")]
+                failed = [t for t in created_tickets if not t.get("success")]
+
+                return {
+                    "success": len(successful) > 0,
+                    "tickets": created_tickets,
+                    "message": f"Created {len(successful)}/{len(assignee_emails)} tickets",
+                    "summary": {
+                        "successful": len(successful),
+                        "failed": len(failed)
+                    }
+                }
+
+            # Single assignee or no assignee
+            assignee_email = assignee_emails[0] if assignee_emails else None
+            return await self._create_single_ticket(parameters, assignee_email)
+
+        except Exception as e:
+            logger.error(f"[MCP] Jira tool error: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    async def _create_single_ticket(
+        self,
+        parameters: Dict[str, Any],
+        assignee_email: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Create a single JIRA ticket with optional assignee."""
         try:
             logger.info(f"[MCP] Creating Jira ticket: {parameters.get('summary')}")
 
@@ -61,11 +166,15 @@ class JiraTool(MCPTool):
                 "priority": {"name": parameters.get("priority", "Medium")}
             }
 
-            if parameters.get("assignee"):
-                # Find user by email
-                users = self.jira_client.search_users(query=parameters["assignee"])
+            # Add assignee if provided
+            if assignee_email:
+                # Find user by email in JIRA
+                users = self.jira_client.search_users(query=assignee_email)
                 if users:
                     issue_fields["assignee"] = {"accountId": users[0].accountId}
+                    logger.info(f"[MCP] Assigned to {assignee_email} (accountId: {users[0].accountId})")
+                else:
+                    logger.warning(f"[MCP] User {assignee_email} not found in JIRA, creating unassigned ticket")
 
             new_issue = self.jira_client.create_issue(fields=issue_fields)
 
@@ -73,14 +182,16 @@ class JiraTool(MCPTool):
                 "success": True,
                 "ticket_key": new_issue.key,
                 "ticket_url": f"{self.jira_client._options['server']}/browse/{new_issue.key}",
-                "message": f"Created ticket {new_issue.key}"
+                "message": f"Created ticket {new_issue.key}",
+                "assignee": assignee_email
             }
 
         except Exception as e:
-            logger.error(f"[MCP] Jira tool error: {e}")
+            logger.error(f"[MCP] Jira tool error for assignee {assignee_email}: {e}")
             return {
                 "success": False,
-                "error": str(e)
+                "error": str(e),
+                "assignee": assignee_email
             }
 
 

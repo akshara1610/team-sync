@@ -292,11 +292,17 @@ class TeamSyncOrchestrator:
         logger.info(f"[LangGraph] Node: ACTION (via MCP)")
 
         try:
-            from src.models.schemas import MeetingSummary
+            from src.models.schemas import MeetingSummary, TranscriptData
             summary = MeetingSummary(**state["final_summary"])
 
             summary_path = f"data/summaries/{state['meeting_id']}.json"
             self.summarizer_agent.save_summary(summary, summary_path)
+
+            # Set participants in MCP context for assignee mapping
+            transcript = TranscriptData(**state["transcript"])
+            if transcript.participants:
+                self.mcp_server.set_context("participants", transcript.participants)
+                logger.info(f"[Orchestrator] Set participants in MCP context: {transcript.participants}")
 
             # Create tickets via MCP
             jira_tickets = []
@@ -325,9 +331,35 @@ class TeamSyncOrchestrator:
             from src.models.schemas import MeetingSummary
             summary = MeetingSummary(**state["final_summary"])
 
-            followup = None
-            if summary.action_items or summary.unresolved_questions:
-                # Use MCP calendar tool - schedule for next week
+            scheduled_events = []
+
+            # First, schedule any meetings mentioned in action items
+            for action_item in summary.action_items:
+                if self._is_meeting_action_item(action_item):
+                    logger.info(f"[Orchestrator] Found meeting action item: {action_item.title}")
+                    # TODO: Parse meeting details (date, time) from description
+                    # For now, schedule for next week
+                    from datetime import timedelta
+                    start_time = datetime.utcnow() + timedelta(days=3)  # 3 days from now
+                    end_time = start_time + timedelta(hours=1)
+
+                    result = _run_async(self.mcp_server.execute_tool(
+                        "calendar_create_event",
+                        {
+                            "summary": action_item.title,
+                            "description": action_item.description,
+                            "start_time": start_time.isoformat(),
+                            "end_time": end_time.isoformat(),
+                            "attendees": summary.participants
+                        }
+                    ))
+
+                    if result.get("success"):
+                        scheduled_events.append(result)
+                        logger.info(f"[Orchestrator] Scheduled meeting: {action_item.title}")
+
+            # If no specific meetings were found but there are unresolved items, schedule generic follow-up
+            if not scheduled_events and (summary.action_items or summary.unresolved_questions):
                 from datetime import timedelta
                 start_time = datetime.utcnow() + timedelta(days=7)
                 end_time = start_time + timedelta(hours=1)
@@ -344,16 +376,37 @@ class TeamSyncOrchestrator:
                 ))
 
                 if result.get("success"):
-                    followup = result
+                    scheduled_events.append(result)
 
             return {
-                "followup_meeting": followup or {},
-                "messages": [HumanMessage(content="Follow-up scheduled via MCP" if followup else "No follow-up needed")]
+                "followup_meeting": {"events": scheduled_events, "success": len(scheduled_events) > 0},
+                "messages": [HumanMessage(content=f"Scheduled {len(scheduled_events)} event(s) via MCP" if scheduled_events else "No follow-up needed")]
             }
 
         except Exception as e:
             logger.error(f"Schedule node error: {e}")
             return {"followup_meeting": {}, "errors": [f"Schedule error: {str(e)}"]}
+
+    def _is_meeting_action_item(self, action_item) -> bool:
+        """Check if action item is a meeting (same logic as action agent)."""
+        meeting_keywords = [
+            "attend meeting",
+            "join meeting",
+            "meeting on",
+            "schedule meeting",
+            "mandatory meeting",
+            "attend session",
+            "participate in meeting"
+        ]
+
+        title_lower = action_item.title.lower()
+        desc_lower = action_item.description.lower()
+
+        for keyword in meeting_keywords:
+            if keyword in title_lower or keyword in desc_lower:
+                return True
+
+        return False
 
     def _store_node(self, state: MeetingState) -> Dict[str, Any]:
         """Node 7: Store in knowledge base."""

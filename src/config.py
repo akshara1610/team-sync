@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     LIVEKIT_API_SECRET: str
 
     # LLM Provider Configuration
-    LLM_PROVIDER: str = "gemini"  # Options: "openai", "gemini", "anthropic"
+    LLM_PROVIDER: str = "openai"  # Options: "openai", "gemini", "anthropic"
 
     # OpenAI
     OPENAI_API_KEY: str = ""
@@ -56,8 +56,8 @@ class Settings(BaseSettings):
 
     # Agent Configuration
     MAX_REFLECTION_ITERATIONS: int = 3
-    SUMMARIZER_MODEL: str = "gemini-2.0-flash-exp"  # Gemini 2.0 Flash (latest, fastest)
-    # Other options: "gemini-1.5-pro", "gemini-1.5-flash", "gpt-4-turbo-preview", "claude-3-5-sonnet-20241022"
+    SUMMARIZER_MODEL: str = "gpt-4o-mini"  # OpenAI GPT-4o-mini (fastest, cheapest)
+    # Other options: "gpt-4o", "gpt-4-turbo", "gemini-2.0-flash-exp", "claude-3-5-sonnet-20241022"
     KNOWLEDGE_AGENT_TOP_K: int = 5
 
     # API
