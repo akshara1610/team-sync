@@ -14,7 +14,7 @@
 
 TeamSync addresses the universal bottleneck of post-meeting work through a sophisticated multi-agent AI system that:
 
-- **Joins and transcribes** live meetings in real-time using LiveKit and Whisper
+- **Joins and transcribes** live meetings in real-time using Google Meet Adapter and Whisper
 - **Generates comprehensive** Minutes of Meeting (MoM) with key decisions
 - **Extracts action items** with assignees and creates Jira tickets automatically
 - **Self-validates** outputs using a Self-Reflection Agent for trustworthiness
@@ -46,7 +46,7 @@ TeamSync uses a distributed multi-agent topology with six specialized agents:
 ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
 │  Listener   │ │  Knowledge  │ │ Summarizer  │
 │   Agent     │ │   Agent     │ │   Agent     │
-│ (LiveKit +  │ │ (RAG with   │ │ (GPT-4 +    │
+│ (GMeet   +  │ │ (RAG with   │ │ (GPT-4 +    │
 │  Whisper)   │ │  ChromaDB)  │ │  Prompts)   │
 └─────────────┘ └─────────────┘ └─────────────┘
        │               │               │
