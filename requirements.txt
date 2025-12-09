@@ -27,6 +27,13 @@ livekit-api>=0.8.0
 openai-whisper>=20231117
 faster-whisper>=1.0.0
 pyannote.audio>=3.3.0
+pyaudio>=0.2.14
+# wave is built into Python standard library, no need to install
+# pydub not needed - using wave module for audio duration
+
+# Browser Automation
+selenium>=4.25.0
+undetected-chromedriver>=3.5.5
 
 # Vector DB and Embeddings
 chromadb>=0.5.0
