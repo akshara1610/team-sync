@@ -127,6 +127,119 @@ async def workflow_info():
     }
 
 
+@app.post("/meetings/test")
+async def test_meeting_workflow():
+    """
+    Test endpoint that runs the workflow with mock transcript data.
+
+    This bypasses LiveKit and uses a sample meeting transcript to test
+    the complete LangGraph + MCP workflow.
+    """
+    from datetime import datetime, timedelta
+    from src.models.schemas import TranscriptData, SpeakerSegment
+    import uuid
+
+    try:
+        # Create mock transcript
+        meeting_id = str(uuid.uuid4())
+        segments = [
+            SpeakerSegment(
+                speaker="Akshara Pramod",
+                text="Good morning everyone! Let's start our sprint planning meeting. We have a lot to cover today.",
+                start_time=0.0,
+                end_time=5.2
+            ),
+            SpeakerSegment(
+                speaker="Vrinda Ahuja",
+                text="Thanks Akshara. I wanted to discuss the API migration to GraphQL. I think we should prioritize this for the current sprint.",
+                start_time=5.5,
+                end_time=12.3
+            ),
+            SpeakerSegment(
+                speaker="Akshara Pramod",
+                text="Good point. Vrinda (vva2113@columbia.edu), can you take the lead on the API migration? We need a detailed plan by next Friday.",
+                start_time=12.8,
+                end_time=18.4
+            ),
+            SpeakerSegment(
+                speaker="Vrinda Ahuja",
+                text="Absolutely. I'll start with the user service and create a proof of concept. Should have it ready by Friday.",
+                start_time=19.0,
+                end_time=25.1
+            ),
+            SpeakerSegment(
+                speaker="Sachi Kaushik",
+                text="I can help with the frontend integration once the API is ready. Also, we need to implement Redis caching to reduce database load.",
+                start_time=25.8,
+                end_time=33.2
+            ),
+            SpeakerSegment(
+                speaker="Akshara Pramod",
+                text="Great. Sachi (sk5476@columbia.edu), can you handle the Redis implementation? We should also schedule a follow-up meeting next week to review progress.",
+                start_time=34.0,
+                end_time=41.5
+            )
+        ]
+
+        transcript = TranscriptData(
+            meeting_id=meeting_id,
+            meeting_title="Sprint Planning - API Migration",
+            start_time=datetime.utcnow(),
+            end_time=datetime.utcnow() + timedelta(minutes=2),
+            segments=segments,
+            participants=["ap4613@columbia.edu", "sk5476@columbia.edu", "vva2113@columbia.edu", "akshararuhi@gmail.com"]
+        )
+
+        # Populate orchestrator's listener with mock data
+        orchestrator.listener_agent.meeting_id = transcript.meeting_id
+        orchestrator.listener_agent.segments = transcript.segments
+        orchestrator.listener_agent.participants = set(transcript.participants)
+
+        # Initialize workflow state
+        initial_state = {
+            "meeting_id": meeting_id,
+            "meeting_title": transcript.meeting_title,
+            "room_name": "test-room",
+            "start_time": transcript.start_time,
+            "status": "initialized",
+            "transcript": {},
+            "transcript_path": "",
+            "initial_summary": {},
+            "reflection_feedback": {},
+            "final_summary": {},
+            "summary_path": "",
+            "jira_tickets": [],
+            "followup_meeting": {},
+            "messages": [],
+            "validation_passed": False,
+            "reflection_iterations": 0,
+            "errors": [],
+            "mcp_audit_log": []
+        }
+
+        # Run workflow
+        final_state = orchestrator.app.invoke(initial_state)
+
+        return {
+            "meeting_id": meeting_id,
+            "status": "success" if not final_state.get("errors") else "completed_with_errors",
+            "transcript_path": final_state.get("transcript_path"),
+            "summary_path": final_state.get("summary_path"),
+            "jira_tickets": final_state.get("jira_tickets", []),
+            "followup_meeting": final_state.get("followup_meeting", {}),
+            "reflection_iterations": final_state.get("reflection_iterations", 0),
+            "workflow_status": final_state.get("status"),
+            "errors": final_state.get("errors", []),
+            "workflow_messages": [msg.content for msg in final_state.get("messages", [])]
+        }
+
+    except Exception as e:
+        logger.error(f"Test workflow failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host=settings.API_HOST, port=settings.API_PORT)

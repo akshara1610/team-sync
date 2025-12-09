@@ -1,5 +1,5 @@
 import asyncio
-from typing import List, Optional
+from typing import List, Optional, Dict
 import json
 from datetime import datetime
 from loguru import logger
@@ -157,6 +157,12 @@ class ListenerAgent:
         """
         try:
             logger.info("Performing speaker diarization...")
+            self._ensure_models_loaded()
+
+            if self.diarization_pipeline is None:
+                logger.warning("Diarization pipeline not available, falling back to transcription only")
+                return await self._transcribe_without_diarization(audio_path)
+
             diarization = self.diarization_pipeline(audio_path)
 
             diarized_segments = []
@@ -175,6 +181,243 @@ class ListenerAgent:
         except Exception as e:
             logger.error(f"Error in diarization: {e}")
             return []
+
+    async def _transcribe_without_diarization(self, audio_path: str) -> List[SpeakerSegment]:
+        """
+        Transcribe audio without diarization (fallback mode).
+
+        Args:
+            audio_path: Path to audio file
+
+        Returns:
+            List of segments with generic speaker labels
+        """
+        try:
+            logger.info("Transcribing audio without speaker diarization...")
+            self._ensure_models_loaded()
+
+            segments, info = self.whisper_model.transcribe(
+                audio_path,
+                language="en",
+                task="transcribe",
+                vad_filter=True
+            )
+
+            result = []
+            for segment in segments:
+                speaker_segment = SpeakerSegment(
+                    speaker="SPEAKER_00",  # Single speaker fallback
+                    start_time=segment.start,
+                    end_time=segment.end,
+                    text=segment.text.strip()
+                )
+                result.append(speaker_segment)
+
+            logger.info(f"Transcribed {len(result)} segments without diarization")
+            return result
+
+        except Exception as e:
+            logger.error(f"Error in transcription: {e}")
+            return []
+
+    async def transcribe_and_diarize(self, audio_path: str) -> List[SpeakerSegment]:
+        """
+        Complete pipeline: Transcribe audio with Whisper and perform speaker diarization,
+        then merge the results to get speaker-labeled transcripts.
+
+        Args:
+            audio_path: Path to audio file
+
+        Returns:
+            List of speaker segments with both text and speaker labels
+        """
+        try:
+            logger.info("Starting complete transcription + diarization pipeline...")
+            self._ensure_models_loaded()
+
+            # Step 1: Whisper transcription (gets text + timestamps)
+            logger.info("Step 1: Transcribing with Whisper...")
+            whisper_segments, info = self.whisper_model.transcribe(
+                audio_path,
+                language="en",
+                task="transcribe",
+                vad_filter=True
+            )
+
+            whisper_segments = list(whisper_segments)
+            logger.info(f"Whisper transcribed {len(whisper_segments)} segments")
+
+            # Step 2: Speaker diarization (gets speaker labels + timestamps)
+            if self.diarization_pipeline is None:
+                logger.warning("No diarization pipeline available, using single speaker")
+                # Fallback: all segments assigned to SPEAKER_00
+                result = []
+                for segment in whisper_segments:
+                    result.append(SpeakerSegment(
+                        speaker="SPEAKER_00",
+                        start_time=segment.start,
+                        end_time=segment.end,
+                        text=segment.text.strip()
+                    ))
+                return result
+
+            logger.info("Step 2: Performing speaker diarization...")
+            diarization = self.diarization_pipeline(audio_path)
+
+            # Convert diarization to list of (start, end, speaker) tuples
+            diar_segments = []
+            for turn, _, speaker in diarization.itertracks(yield_label=True):
+                diar_segments.append({
+                    'start': turn.start,
+                    'end': turn.end,
+                    'speaker': speaker
+                })
+
+            logger.info(f"Diarization identified {len(set(d['speaker'] for d in diar_segments))} unique speakers")
+
+            # Step 3: Merge Whisper text with diarization speakers
+            logger.info("Step 3: Merging transcription with speaker labels...")
+            merged_segments = self._merge_transcription_and_diarization(
+                whisper_segments,
+                diar_segments
+            )
+
+            logger.info(f"Created {len(merged_segments)} merged segments")
+            return merged_segments
+
+        except Exception as e:
+            logger.error(f"Error in transcribe_and_diarize: {e}")
+            return []
+
+    def _merge_transcription_and_diarization(
+        self,
+        whisper_segments: list,
+        diar_segments: list
+    ) -> List[SpeakerSegment]:
+        """
+        Merge Whisper transcription segments with diarization speaker labels.
+
+        For each Whisper segment, find the overlapping diarization segment
+        and assign the speaker label.
+
+        Args:
+            whisper_segments: List of Whisper segment objects with .start, .end, .text
+            diar_segments: List of dicts with 'start', 'end', 'speaker'
+
+        Returns:
+            List of SpeakerSegment objects with both text and speaker labels
+        """
+        merged = []
+
+        for w_seg in whisper_segments:
+            # Find best matching diarization segment (maximum overlap)
+            best_speaker = "SPEAKER_UNKNOWN"
+            max_overlap = 0.0
+
+            w_start = w_seg.start
+            w_end = w_seg.end
+            w_duration = w_end - w_start
+
+            for d_seg in diar_segments:
+                # Calculate overlap between whisper segment and diarization segment
+                overlap_start = max(w_start, d_seg['start'])
+                overlap_end = min(w_end, d_seg['end'])
+                overlap = max(0, overlap_end - overlap_start)
+
+                # Use segment with maximum overlap
+                if overlap > max_overlap:
+                    max_overlap = overlap
+                    best_speaker = d_seg['speaker']
+
+            # Only assign speaker if overlap is significant (>50% of whisper segment)
+            if max_overlap / w_duration < 0.5:
+                logger.warning(f"Low overlap for segment at {w_start:.2f}s, using best match anyway")
+
+            merged_segment = SpeakerSegment(
+                speaker=best_speaker,
+                start_time=w_start,
+                end_time=w_end,
+                text=w_seg.text.strip()
+            )
+            merged.append(merged_segment)
+
+        return merged
+
+    def simple_roster_mapping(
+        self,
+        segments: List[SpeakerSegment],
+        participant_emails: List[str]
+    ) -> Dict[str, str]:
+        """
+        Simple speaker mapping based on frequency (most talkative = first participant).
+
+        Strategy:
+        - Count segments per speaker
+        - Most talkative speaker → first participant
+        - Second most talkative → second participant
+        - etc.
+
+        Args:
+            segments: List of segments with SPEAKER_XX labels
+            participant_emails: List of participant emails from calendar/meeting
+
+        Returns:
+            Mapping dict: {"SPEAKER_00": "email@domain.com", ...}
+        """
+        # Count segments per speaker
+        speaker_counts = {}
+        for seg in segments:
+            speaker_counts[seg.speaker] = speaker_counts.get(seg.speaker, 0) + 1
+
+        # Sort by frequency (most talkative first)
+        sorted_speakers = sorted(
+            speaker_counts.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+
+        # Map to participants
+        mapping = {}
+        for i, (speaker, count) in enumerate(sorted_speakers):
+            if i < len(participant_emails):
+                mapping[speaker] = participant_emails[i]
+                logger.info(f"Mapped {speaker} → {participant_emails[i]} ({count} segments)")
+            else:
+                mapping[speaker] = f"{speaker}"  # Keep original if not enough participants
+                logger.warning(f"No participant for {speaker}, keeping original label")
+
+        return mapping
+
+    def map_speaker_names(
+        self,
+        segments: List[SpeakerSegment],
+        speaker_mapping: dict
+    ) -> List[SpeakerSegment]:
+        """
+        Map generic speaker labels (SPEAKER_00, SPEAKER_01) to actual names.
+
+        Args:
+            segments: List of segments with generic speaker labels
+            speaker_mapping: Dict mapping labels to names, e.g.,
+                            {"SPEAKER_00": "Akshara Pramod", "SPEAKER_01": "Vrinda Ahuja"}
+
+        Returns:
+            List of segments with mapped speaker names
+        """
+        mapped_segments = []
+
+        for segment in segments:
+            speaker = speaker_mapping.get(segment.speaker, segment.speaker)
+            mapped_segment = SpeakerSegment(
+                speaker=speaker,
+                start_time=segment.start_time,
+                end_time=segment.end_time,
+                text=segment.text
+            )
+            mapped_segments.append(mapped_segment)
+
+        logger.info(f"Mapped {len(segments)} segments to named speakers")
+        return mapped_segments
 
     def get_transcript(self, meeting_title: str, start_time: datetime) -> TranscriptData:
         """

@@ -1,7 +1,8 @@
 from typing import List, Tuple
 import json
+import time
 from loguru import logger
-from openai import OpenAI
+import google.generativeai as genai
 from src.config import settings
 from src.models.schemas import (
     MeetingSummary,
@@ -22,10 +23,36 @@ class SelfReflectionAgent:
     """
 
     def __init__(self):
-        self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
-        self.model = settings.SUMMARIZER_MODEL
+        genai.configure(api_key=settings.GOOGLE_API_KEY)
+        self.model = genai.GenerativeModel(settings.SUMMARIZER_MODEL)
         self.max_iterations = settings.MAX_REFLECTION_ITERATIONS
-        logger.info(f"Self-Reflection Agent initialized with max {self.max_iterations} iterations")
+        logger.info(f"Self-Reflection Agent initialized with Gemini model: {settings.SUMMARIZER_MODEL}, max {self.max_iterations} iterations")
+
+    def _call_llm(self, prompt: str, max_retries: int = 3) -> str:
+        """Helper method to call Gemini with rate limit handling."""
+        for attempt in range(max_retries):
+            try:
+                response = self.model.generate_content(prompt)
+                return response.text.strip()
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str or "quota" in error_str.lower() or "rate" in error_str.lower():
+                    # Rate limit hit - extract wait time or use default
+                    wait_time = 30 * (attempt + 1)  # 30s, 60s, 90s
+                    if "retry_delay" in error_str:
+                        try:
+                            # Try to extract the retry delay from error
+                            import re
+                            match = re.search(r'seconds:\s*(\d+)', error_str)
+                            if match:
+                                wait_time = int(match.group(1)) + 5  # Add buffer
+                        except:
+                            pass
+                    logger.warning(f"Rate limit hit, waiting {wait_time}s before retry {attempt + 1}/{max_retries}")
+                    time.sleep(wait_time)
+                else:
+                    raise e
+        raise Exception(f"Max retries ({max_retries}) exceeded for LLM call")
 
     def validate_summary(
         self,
@@ -143,17 +170,7 @@ Be critical - flag anything that seems exaggerated, misrepresented, or not suppo
 Inconsistencies (one per line, or "NONE"):"""
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are a critical fact-checker for meeting summaries."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.1,
-                max_tokens=800
-            )
-
-            content = response.choices[0].message.content.strip()
+            content = self._call_llm(prompt)
 
             if content.upper() == "NONE" or "no inconsistencies" in content.lower():
                 return []
@@ -195,17 +212,7 @@ List any missing action items. If all action items were captured, respond with "
 Missing Action Items (one per line, or "NONE"):"""
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are an expert at identifying action items in meetings."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.1,
-                max_tokens=600
-            )
-
-            content = response.choices[0].message.content.strip()
+            content = self._call_llm(prompt)
 
             if content.upper() == "NONE" or "no missing" in content.lower():
                 return []
@@ -252,17 +259,7 @@ Respond with ONLY a number between 0.0 and 1.0, where:
 Score:"""
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are an expert at evaluating meeting summary quality."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.0,
-                max_tokens=10
-            )
-
-            content = response.choices[0].message.content.strip()
+            content = self._call_llm(prompt)
             score = float(content)
             return max(0.0, min(1.0, score))  # Clamp between 0 and 1
 
@@ -301,17 +298,7 @@ Focus on:
 Return the improved summary as JSON with the same structure as the original."""
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are an expert at improving meeting summaries based on feedback."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                max_tokens=2000
-            )
-
-            content = response.choices[0].message.content.strip()
+            content = self._call_llm(prompt)
 
             # Extract JSON from markdown if present
             if "```json" in content:

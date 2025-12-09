@@ -129,8 +129,20 @@ class TeamSyncOrchestrator:
 
         # Define edges
         workflow.set_entry_point("listen")
-        workflow.add_edge("listen", "summarize")
-        workflow.add_edge("summarize", "reflect")
+
+        # Conditional: check if listen succeeded
+        workflow.add_conditional_edges(
+            "listen",
+            lambda state: "summarize" if state.get("status") != "failed" else END,
+            {"summarize": "summarize", END: END}
+        )
+
+        # Conditional: check if summarize succeeded
+        workflow.add_conditional_edges(
+            "summarize",
+            lambda state: "reflect" if state.get("status") != "failed" else END,
+            {"reflect": "reflect", END: END}
+        )
 
         # Conditional: reflection passes or needs improvement
         workflow.add_conditional_edges(
@@ -158,6 +170,17 @@ class TeamSyncOrchestrator:
                 state["start_time"]
             )
 
+            # Check if transcript has segments
+            if not transcript.segments:
+                error_msg = "No transcript segments captured. Meeting may not have started or no audio was detected."
+                logger.error(error_msg)
+                return {
+                    "errors": [error_msg],
+                    "status": "failed",
+                    "transcript": {},
+                    "transcript_path": ""
+                }
+
             transcript_path = f"data/transcripts/{state['meeting_id']}.json"
             self.listener_agent.save_transcript(transcript_path)
 
@@ -170,15 +193,35 @@ class TeamSyncOrchestrator:
 
         except Exception as e:
             logger.error(f"Listen node error: {e}")
-            return {"errors": [f"Listen error: {str(e)}"], "status": "failed"}
+            return {"errors": [f"Listen error: {str(e)}"], "status": "failed", "transcript": {}, "transcript_path": ""}
 
     def _summarize_node(self, state: MeetingState) -> Dict[str, Any]:
         """Node 2: Generate summary."""
         logger.info(f"[LangGraph] Node: SUMMARIZE")
 
         try:
+            # Check if we have a valid transcript
+            if not state.get("transcript") or state.get("status") == "failed":
+                error_msg = "Cannot summarize: no valid transcript available"
+                logger.error(error_msg)
+                return {
+                    "errors": state.get("errors", []) + [error_msg],
+                    "status": "failed",
+                    "initial_summary": {}
+                }
+
             from src.models.schemas import TranscriptData
             transcript = TranscriptData(**state["transcript"])
+
+            if not transcript.segments:
+                error_msg = "Cannot summarize: transcript has no segments"
+                logger.error(error_msg)
+                return {
+                    "errors": [error_msg],
+                    "status": "failed",
+                    "initial_summary": {}
+                }
+
             summary = self.summarizer_agent.generate_summary(transcript)
 
             return {
@@ -189,7 +232,7 @@ class TeamSyncOrchestrator:
 
         except Exception as e:
             logger.error(f"Summarize node error: {e}")
-            return {"errors": [f"Summarize error: {str(e)}"], "status": "failed"}
+            return {"errors": [f"Summarize error: {str(e)}"], "status": "failed", "initial_summary": {}}
 
     def _reflect_node(self, state: MeetingState) -> Dict[str, Any]:
         """Node 3: Self-reflection validation."""
@@ -198,7 +241,19 @@ class TeamSyncOrchestrator:
         try:
             from src.models.schemas import MeetingSummary, TranscriptData
 
-            summary_dict = state.get("final_summary", state["initial_summary"])
+            # Use final_summary if it exists (from previous improve cycle), otherwise use initial_summary
+            summary_dict = state.get("final_summary") or state.get("initial_summary")
+
+            if not summary_dict or summary_dict == {}:
+                error_msg = "Cannot reflect: no summary available"
+                logger.error(error_msg)
+                return {
+                    "errors": [error_msg],
+                    "status": "failed",
+                    "final_summary": state.get("initial_summary", {}),
+                    "validation_passed": False
+                }
+
             summary = MeetingSummary(**summary_dict)
             transcript = TranscriptData(**state["transcript"])
 
@@ -217,7 +272,15 @@ class TeamSyncOrchestrator:
 
         except Exception as e:
             logger.error(f"Reflect node error: {e}")
-            return {"errors": [f"Reflect error: {str(e)}"], "status": "failed"}
+            import traceback
+            traceback.print_exc()
+            # On error, preserve initial_summary as final_summary so workflow can continue
+            return {
+                "errors": [f"Reflect error: {str(e)}"],
+                "status": "failed",
+                "final_summary": state.get("initial_summary", {}),
+                "validation_passed": True  # Force continue on error to avoid infinite loop
+            }
 
     def _improve_node(self, state: MeetingState) -> Dict[str, Any]:
         """Node 4: Improvement step."""
@@ -326,11 +389,20 @@ class TeamSyncOrchestrator:
 
     def _should_improve(self, state: MeetingState) -> str:
         """Conditional edge: improve or continue."""
+        # If workflow has failed, don't loop - continue to end
+        if state.get("status") == "failed":
+            logger.error("Workflow failed, skipping improvement loop")
+            return "continue"
+
+        # If validation passed, continue
         if state.get("validation_passed", False):
             return "continue"
+
+        # If max iterations reached, continue
         if state.get("reflection_iterations", 0) >= 3:
             logger.warning("Max reflection iterations reached")
             return "continue"
+
         return "improve"
 
     # Public API

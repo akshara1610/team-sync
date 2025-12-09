@@ -1,8 +1,10 @@
 from typing import List
 import json
+import time
+import re
 from datetime import datetime
 from loguru import logger
-from openai import OpenAI
+import google.generativeai as genai
 from src.config import settings
 from src.models.schemas import (
     TranscriptData,
@@ -19,9 +21,9 @@ class SummarizerAgent:
     """
 
     def __init__(self):
-        self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
-        self.model = settings.SUMMARIZER_MODEL
-        logger.info(f"Summarizer Agent initialized with model: {self.model}")
+        genai.configure(api_key=settings.GOOGLE_API_KEY)
+        self.model = genai.GenerativeModel(settings.SUMMARIZER_MODEL)
+        logger.info(f"Summarizer Agent initialized with Gemini model: {settings.SUMMARIZER_MODEL}")
 
     def generate_summary(self, transcript: TranscriptData) -> MeetingSummary:
         """
@@ -85,6 +87,26 @@ class SummarizerAgent:
             logger.error(f"Error generating summary: {e}")
             raise
 
+    def _call_llm(self, prompt: str, max_retries: int = 3) -> str:
+        """Helper method to call Gemini with rate limit handling."""
+        for attempt in range(max_retries):
+            try:
+                response = self.model.generate_content(prompt)
+                return response.text.strip()
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str or "quota" in error_str.lower() or "rate" in error_str.lower():
+                    # Rate limit hit - extract wait time or use default
+                    wait_time = 30 * (attempt + 1)  # 30s, 60s, 90s
+                    match = re.search(r'seconds:\s*(\d+)', error_str)
+                    if match:
+                        wait_time = int(match.group(1)) + 5  # Add buffer
+                    logger.warning(f"Rate limit hit, waiting {wait_time}s before retry {attempt + 1}/{max_retries}")
+                    time.sleep(wait_time)
+                else:
+                    raise e
+        raise Exception(f"Max retries ({max_retries}) exceeded for LLM call")
+
     def _build_transcript_text(self, transcript: TranscriptData) -> str:
         """Build formatted transcript text from segments."""
         lines = []
@@ -95,8 +117,8 @@ class SummarizerAgent:
 
     def _generate_executive_summary(self, transcript_text: str) -> str:
         """Generate executive summary using LLM."""
-        prompt = f"""You are an expert at summarizing meetings. Create a concise executive summary (2-3 paragraphs)
-of the following meeting transcript. Focus on the main topics discussed, key outcomes, and overall purpose.
+        prompt = f"""You are an expert meeting summarizer. Create a concise executive summary (2-3 paragraphs) of the following meeting transcript.
+Focus on the main topics discussed, key outcomes, and overall purpose.
 
 Transcript:
 {transcript_text}
@@ -104,16 +126,7 @@ Transcript:
 Executive Summary:"""
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are an expert meeting summarizer."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                max_tokens=500
-            )
-            return response.choices[0].message.content.strip()
+            return self._call_llm(prompt)
         except Exception as e:
             logger.error(f"Error generating executive summary: {e}")
             return "Unable to generate executive summary."
@@ -124,7 +137,7 @@ Executive Summary:"""
         transcript: TranscriptData
     ) -> List[KeyDecision]:
         """Extract key decisions from transcript."""
-        prompt = f"""Analyze the following meeting transcript and extract ALL key decisions that were made.
+        prompt = f"""You are an expert at extracting key decisions from meetings. Analyze the following meeting transcript and extract ALL key decisions that were made.
 For each decision, provide:
 1. The decision that was made
 2. The context/reasoning behind it
@@ -139,17 +152,8 @@ Transcript:
 Key Decisions (JSON array):"""
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are an expert at extracting key decisions from meetings. Always respond with valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.2,
-                max_tokens=1000
-            )
+            content = self._call_llm(prompt)
 
-            content = response.choices[0].message.content.strip()
             # Extract JSON from markdown code blocks if present
             if "```json" in content:
                 content = content.split("```json")[1].split("```")[0].strip()
@@ -180,7 +184,7 @@ Key Decisions (JSON array):"""
         transcript: TranscriptData
     ) -> List[ActionItem]:
         """Extract action items with assignees from transcript."""
-        prompt = f"""Analyze the following meeting transcript and extract ALL action items (tasks, todos, assignments).
+        prompt = f"""You are an expert at extracting action items from meetings. Analyze the following meeting transcript and extract ALL action items (tasks, todos, assignments).
 For each action item, identify:
 1. The task title (concise)
 2. Detailed description
@@ -196,17 +200,8 @@ Transcript:
 Action Items (JSON array):"""
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are an expert at extracting action items from meetings. Always respond with valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.2,
-                max_tokens=1500
-            )
+            content = self._call_llm(prompt)
 
-            content = response.choices[0].message.content.strip()
             # Extract JSON from markdown code blocks if present
             if "```json" in content:
                 content = content.split("```json")[1].split("```")[0].strip()
@@ -235,7 +230,7 @@ Action Items (JSON array):"""
 
     def _extract_discussion_points(self, transcript_text: str) -> List[str]:
         """Extract main discussion points."""
-        prompt = f"""Analyze the following meeting transcript and extract the main discussion points/topics.
+        prompt = f"""You are an expert at identifying key discussion points. Analyze the following meeting transcript and extract the main discussion points/topics.
 Provide a bulleted list of 5-8 key discussion points.
 
 Transcript:
@@ -244,17 +239,8 @@ Transcript:
 Discussion Points (as a simple list, one per line):"""
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are an expert at identifying key discussion points."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                max_tokens=500
-            )
+            content = self._call_llm(prompt)
 
-            content = response.choices[0].message.content.strip()
             # Parse bullet points
             points = [
                 line.strip().lstrip("-•* ").strip()
@@ -269,7 +255,7 @@ Discussion Points (as a simple list, one per line):"""
 
     def _extract_unresolved_questions(self, transcript_text: str) -> List[str]:
         """Extract unresolved questions and open issues."""
-        prompt = f"""Analyze the following meeting transcript and identify any unresolved questions,
+        prompt = f"""You are an expert at identifying unresolved questions. Analyze the following meeting transcript and identify any unresolved questions,
 open issues, or topics that need further discussion.
 
 Transcript:
@@ -278,17 +264,8 @@ Transcript:
 Unresolved Questions (as a simple list, one per line):"""
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are an expert at identifying unresolved questions."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                max_tokens=400
-            )
+            content = self._call_llm(prompt)
 
-            content = response.choices[0].message.content.strip()
             questions = [
                 line.strip().lstrip("-•* ").strip()
                 for line in content.split("\n")

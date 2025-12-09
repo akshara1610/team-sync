@@ -6,15 +6,13 @@ from typing import List, Dict, Any, Optional
 from loguru import logger
 import chromadb
 from chromadb.config import Settings as ChromaSettings
+import google.generativeai as genai
 
 # LangChain imports
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_chroma import Chroma
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.output_parsers import StrOutputParser
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_huggingface import HuggingFaceEmbeddings
 
 from src.config import settings
 from src.models.schemas import RAGQuery, RAGResponse, TranscriptData
@@ -26,25 +24,23 @@ class KnowledgeAgentLangChain:
 
     Uses:
     - langchain-chroma for vector store integration
-    - langchain-openai for embeddings and LLM
+    - HuggingFace embeddings (free)
+    - Google Gemini for LLM
     - RetrievalQA chain for question answering
     """
 
     def __init__(self):
         logger.info("Initializing Knowledge Agent with LangChain + ChromaDB...")
 
-        # Initialize OpenAI embeddings (replaces sentence-transformers)
-        self.embeddings = OpenAIEmbeddings(
-            openai_api_key=settings.OPENAI_API_KEY,
-            model="text-embedding-3-small"  # Latest embedding model
+        # Initialize HuggingFace embeddings (free, no API key needed)
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name=settings.EMBEDDING_MODEL
         )
 
-        # Initialize ChatOpenAI for LLM
-        self.llm = ChatOpenAI(
-            openai_api_key=settings.OPENAI_API_KEY,
-            model_name=settings.SUMMARIZER_MODEL,
-            temperature=0.3
-        )
+        # Initialize Gemini for LLM
+        genai.configure(api_key=settings.GOOGLE_API_KEY)
+        self.gemini_model = genai.GenerativeModel(settings.SUMMARIZER_MODEL)
+        logger.info(f"Using Gemini model: {settings.SUMMARIZER_MODEL}")
 
         # Initialize Chroma vector store with LangChain
         self.vector_store = Chroma(
@@ -58,36 +54,12 @@ class KnowledgeAgentLangChain:
             search_kwargs={"k": settings.KNOWLEDGE_AGENT_TOP_K}
         )
 
-        # Create custom prompt template for RAG
-        self.qa_prompt = ChatPromptTemplate.from_template("""You are a helpful AI assistant that answers questions about past meetings.
-Use the following context from previous meetings to answer the question accurately.
-If the answer cannot be found in the context, clearly state that you don't have that information.
-
-Context from past meetings:
-{context}
-
-Question: {input}
-
-Instructions:
-- Provide a clear, concise answer based only on the context
-- Include specific references to meetings, speakers, and decisions when relevant
-- If you're not certain, express appropriate uncertainty
-- Use bullet points for multiple items
-
-Answer:""")
-
-        # Create RAG chain using LCEL (LangChain Expression Language)
-        def format_docs(docs):
-            return "\n\n".join([doc.page_content for doc in docs])
-
-        self.rag_chain = (
-            {"context": self.retriever | format_docs, "input": RunnablePassthrough()}
-            | self.qa_prompt
-            | self.llm
-            | StrOutputParser()
-        )
-
         logger.info("Knowledge Agent initialized with LangChain successfully")
+
+    def _call_gemini(self, prompt: str) -> str:
+        """Helper to call Gemini with a prompt."""
+        response = self.gemini_model.generate_content(prompt)
+        return response.text.strip()
 
     def add_transcript(self, transcript: TranscriptData) -> bool:
         """
@@ -172,8 +144,29 @@ Answer:""")
             # Get source documents first
             source_documents = self.retriever.invoke(query)
 
-            # Run the RAG chain
-            answer = self.rag_chain.invoke(query)
+            # Format context from retrieved documents
+            context = "\n\n".join([doc.page_content for doc in source_documents])
+
+            # Create prompt for Gemini
+            prompt = f"""You are a helpful AI assistant that answers questions about past meetings.
+Use the following context from previous meetings to answer the question accurately.
+If the answer cannot be found in the context, clearly state that you don't have that information.
+
+Context from past meetings:
+{context}
+
+Question: {query}
+
+Instructions:
+- Provide a clear, concise answer based only on the context
+- Include specific references to meetings, speakers, and decisions when relevant
+- If you're not certain, express appropriate uncertainty
+- Use bullet points for multiple items
+
+Answer:"""
+
+            # Get answer from Gemini
+            answer = self._call_gemini(prompt)
 
             # Build sources from retrieved documents
             sources = []

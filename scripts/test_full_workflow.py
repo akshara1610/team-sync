@@ -22,91 +22,91 @@ def create_mock_transcript() -> TranscriptData:
 
     segments = [
         SpeakerSegment(
-            speaker="Alice",
+            speaker="Akshara Pramod",
             text="Good morning everyone! Let's start our sprint planning meeting. We have a lot to cover today.",
             start_time=0.0,
             end_time=5.2
         ),
         SpeakerSegment(
-            speaker="Bob",
-            text="Thanks Alice. I wanted to discuss the API migration to GraphQL. I think we should prioritize this for the current sprint.",
+            speaker="Vrinda Ahuja",
+            text="Thanks Akshara. I wanted to discuss the API migration to GraphQL. I think we should prioritize this for the current sprint.",
             start_time=5.5,
             end_time=12.3
         ),
         SpeakerSegment(
-            speaker="Alice",
-            text="Good point. Bob, can you take the lead on the API migration? We need a detailed plan by next Friday.",
+            speaker="Akshara Pramod",
+            text="Good point. Vrinda (vva2113@columbia.edu), can you take the lead on the API migration? We need a detailed plan by next Friday.",
             start_time=12.8,
             end_time=18.4
         ),
         SpeakerSegment(
-            speaker="Bob",
+            speaker="Vrinda Ahuja",
             text="Absolutely. I'll start with the user service and create a proof of concept. Should have it ready by Friday.",
             start_time=19.0,
             end_time=25.1
         ),
         SpeakerSegment(
-            speaker="Charlie",
+            speaker="Sachi Kaushik",
             text="I can help with the frontend integration once the API is ready. Also, we need to implement Redis caching to reduce database load.",
             start_time=25.8,
             end_time=33.2
         ),
         SpeakerSegment(
-            speaker="Alice",
-            text="Great. Charlie, can you handle the Redis implementation? We should also schedule a follow-up meeting next week to review progress.",
+            speaker="Akshara Pramod",
+            text="Great. Sachi (sk5476@columbia.edu), can you handle the Redis implementation? We should also schedule a follow-up meeting next week to review progress.",
             start_time=34.0,
             end_time=41.5
         ),
         SpeakerSegment(
-            speaker="Bob",
+            speaker="Vrinda Ahuja",
             text="What about the authentication refactoring? Should we include that in this sprint or defer it?",
             start_time=42.2,
             end_time=48.0
         ),
         SpeakerSegment(
-            speaker="Alice",
-            text="Let's defer the auth refactoring to next sprint. We have enough on our plate. Bob will focus on API migration, Charlie on Redis, and I'll handle code reviews.",
+            speaker="Akshara Pramod",
+            text="Let's defer the auth refactoring to next sprint. We have enough on our plate. Vrinda (vva2113@columbia.edu) will focus on API migration, Sachi (sk5476@columbia.edu) on Redis, and I'll handle code reviews.",
             start_time=48.8,
             end_time=57.3
         ),
         SpeakerSegment(
-            speaker="Charlie",
+            speaker="Sachi Kaushik",
             text="Sounds good. One more thing - we need to update the API documentation once the migration is done.",
             start_time=58.0,
             end_time=63.5
         ),
         SpeakerSegment(
-            speaker="Alice",
-            text="Good catch. Bob, can you update the docs as part of your API migration task?",
+            speaker="Akshara Pramod",
+            text="Good catch. Vrinda (vva2113@columbia.edu), can you update the docs as part of your API migration task?",
             start_time=64.2,
             end_time=69.0
         ),
         SpeakerSegment(
-            speaker="Bob",
+            speaker="Vrinda Ahuja",
             text="Will do. I'll include that in the ticket.",
             start_time=69.5,
             end_time=72.1
         ),
         SpeakerSegment(
-            speaker="Alice",
-            text="Perfect. Let's wrap up. To summarize: Bob is doing API migration with docs, Charlie handles Redis caching, and we'll meet again next Tuesday to review. Any questions?",
+            speaker="Akshara Pramod",
+            text="Perfect. Let's wrap up. To summarize: Vrinda (vva2113@columbia.edu) is doing API migration with docs, Sachi (sk5476@columbia.edu) handles Redis caching, and we'll meet again next Tuesday to review. Any questions?",
             start_time=73.0,
             end_time=84.2
         ),
         SpeakerSegment(
-            speaker="Charlie",
+            speaker="Sachi Kaushik",
             text="No questions from me. Thanks everyone!",
             start_time=85.0,
             end_time=87.5
         ),
         SpeakerSegment(
-            speaker="Bob",
+            speaker="Vrinda Ahuja",
             text="All clear. See you next week!",
             start_time=88.0,
             end_time=90.2
         ),
         SpeakerSegment(
-            speaker="Alice",
+            speaker="Akshara Pramod",
             text="Great meeting. Thanks everyone!",
             start_time=91.0,
             end_time=93.0
@@ -119,7 +119,7 @@ def create_mock_transcript() -> TranscriptData:
         start_time=datetime.utcnow(),
         end_time=datetime.utcnow() + timedelta(minutes=2),
         segments=segments,
-        participants=["vva2113@columbia.edu"]  # Use valid email for calendar invites
+        participants=["ap4613@columbia.edu", "sk5476@columbia.edu", "vva2113@columbia.edu", "akshararuhi@gmail.com"]
     )
 
 
@@ -137,47 +137,73 @@ async def test_workflow_with_mock_transcript():
     print("✓ Orchestrator initialized")
     print()
 
-    # Create mock transcript
-    print("2. Creating mock meeting transcript...")
+    # Create mock transcript (simulating listener output)
+    print("2. Setting up mock listener data (simulating real meeting)...")
     transcript = create_mock_transcript()
-    print(f"✓ Mock transcript created:")
+
+    # Populate listener agent with mock data (as if it captured a real meeting)
+    orchestrator.listener_agent.meeting_id = transcript.meeting_id
+    orchestrator.listener_agent.segments = transcript.segments
+    orchestrator.listener_agent.participants = set(transcript.participants)
+
+    print(f"✓ Listener agent populated with mock data:")
     print(f"  - Meeting ID: {transcript.meeting_id}")
     print(f"  - Title: {transcript.meeting_title}")
     print(f"  - Participants: {', '.join(transcript.participants)}")
     print(f"  - Segments: {len(transcript.segments)}")
     print()
 
-    # Process through the workflow (skipping LiveKit listener)
-    print("3. Processing through LangGraph + MCP workflow...")
+    # Process through the ENTIRE workflow including listen node
+    print("3. Processing through complete LangGraph + MCP workflow...")
     print()
 
     try:
-        # Initialize workflow state
+        # Initialize workflow state (as it would be at the start)
         initial_state = {
             "meeting_id": transcript.meeting_id,
             "meeting_title": transcript.meeting_title,
-            "transcript": transcript.model_dump(),
-            "summary": None,
-            "validation_result": None,
+            "room_name": "test-room",
+            "start_time": transcript.start_time,
+            "status": "initialized",
+            "transcript": {},
+            "transcript_path": "",
+            "initial_summary": {},
+            "reflection_feedback": {},
+            "final_summary": {},
+            "summary_path": "",
+            "jira_tickets": [],
+            "followup_meeting": {},
+            "messages": [],
+            "validation_passed": False,
             "reflection_iterations": 0,
-            "jira_results": [],
-            "calendar_result": None,
-            "messages": []
+            "errors": [],
+            "mcp_audit_log": []
         }
 
-        # Skip the 'listen' node since we have mock transcript
-        # Start from 'summarize'
-        print("  [Skipping 'listen' node - using mock transcript]")
+        # Run listen node (will use the pre-populated listener data)
+        print("  → Running 'listen' node...")
+        listen_result = orchestrator._listen_node(initial_state)
+        listen_state = {**initial_state, **listen_result}
+        print(f"  ✓ Transcript captured from listener")
+        print(f"    - Segments transcribed: {len(transcript.segments)}")
+        print(f"    - Saved to: {listen_state.get('transcript_path', 'N/A')}")
         print()
 
         # Run summarize
         print("  → Running 'summarize' node...")
-        summary_result = orchestrator._summarize_node(initial_state)
-        summary_state = {**initial_state, **summary_result}
+        summary_result = orchestrator._summarize_node(listen_state)
+        print(f"    - DEBUG: summary_result keys: {list(summary_result.keys())}")
+        print(f"    - DEBUG: 'initial_summary' in summary_result: {'initial_summary' in summary_result}")
+        if 'initial_summary' in summary_result:
+            print(f"    - DEBUG: initial_summary type: {type(summary_result['initial_summary'])}")
+        summary_state = {**listen_state, **summary_result}
         print(f"  ✓ Summary generated")
-        print(f"    - Executive summary: {summary_state['initial_summary']['executive_summary'][:100]}...")
-        print(f"    - Action items: {len(summary_state['initial_summary']['action_items'])}")
-        print(f"    - Key decisions: {len(summary_state['initial_summary']['key_decisions'])}")
+        if summary_state.get('initial_summary'):
+            print(f"    - Executive summary: {summary_state['initial_summary']['executive_summary'][:100]}...")
+            print(f"    - Action items: {len(summary_state['initial_summary']['action_items'])}")
+            print(f"    - Key decisions: {len(summary_state['initial_summary']['key_decisions'])}")
+        else:
+            print(f"    - ERROR: initial_summary is missing or empty!")
         print()
 
         # Run reflect
@@ -188,6 +214,7 @@ async def test_workflow_with_mock_transcript():
         print(f"    - Approved: {reflect_state['validation_passed']}")
         print(f"    - Coherence score: {reflect_state['reflection_feedback'].get('logical_coherence_score', 'N/A')}")
         print(f"    - Issues found: {len(reflect_state['reflection_feedback'].get('consistency_issues', []))}")
+        print(f"    - DEBUG: final_summary keys: {list(reflect_state.get('final_summary', {}).keys())}")
         print()
 
         # Check if improvement needed
