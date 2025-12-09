@@ -58,9 +58,15 @@ class GoogleMeetBotSelenium:
             # Create Chrome options
             options = uc.ChromeOptions()
 
-            # Auto-allow camera and microphone
+            # CRITICAL: Block microphone to prevent echo/feedback
+            # Use fake devices so Google Meet doesn't complain
             options.add_argument('--use-fake-ui-for-media-stream')
             options.add_argument('--use-fake-device-for-media-stream')
+
+            # Disable actual audio capture
+            options.add_argument('--disable-audio-input')
+            options.add_argument('--mute-audio')
+
             options.add_argument('--disable-blink-features=AutomationControlled')
             options.add_argument('--autoplay-policy=no-user-gesture-required')
 
@@ -69,7 +75,7 @@ class GoogleMeetBotSelenium:
             options.add_argument('--no-sandbox')
             options.add_argument('--window-size=1920,1080')
 
-            # Set preferences
+            # Set preferences - Allow camera/mic permissions but we'll mute in UI
             prefs = {
                 "profile.default_content_setting_values.media_stream_mic": 1,
                 "profile.default_content_setting_values.media_stream_camera": 1,
@@ -80,8 +86,13 @@ class GoogleMeetBotSelenium:
             logger.info("🌐 Launching Chrome browser...")
 
             # Create undetected Chrome driver
-            # Specify Chrome version 142 to match installed Chrome
-            self.driver = uc.Chrome(options=options, version_main=142, use_subprocess=True)
+            # Let undetected-chromedriver auto-detect Chrome version
+            try:
+                self.driver = uc.Chrome(options=options, use_subprocess=True)
+            except Exception as e:
+                logger.error(f"Failed to launch Chrome with auto-detection: {e}")
+                logger.info("Trying with version_main=142...")
+                self.driver = uc.Chrome(options=options, version_main=142, use_subprocess=True)
 
             # Navigate to meeting
             logger.info("📍 Opening Google Meet URL...")
@@ -123,13 +134,42 @@ class GoogleMeetBotSelenium:
             except Exception as e:
                 logger.warning(f"⚠️  Could not set name: {e}")
 
-            # Turn off camera
+            # Turn off camera AND microphone (CRITICAL: avoid feedback)
+            logger.info("🎤 Muting microphone...")
+            try:
+                mic_selectors = [
+                    (By.CSS_SELECTOR, '[aria-label*="microphone" i][aria-label*="turn off" i]'),
+                    (By.CSS_SELECTOR, '[aria-label*="microphone" i]'),
+                    (By.XPATH, '//button[contains(@aria-label, "microphone") or contains(@aria-label, "Microphone")]'),
+                ]
+
+                for by, selector in mic_selectors:
+                    try:
+                        mic_btn = WebDriverWait(self.driver, 5).until(
+                            EC.element_to_be_clickable((by, selector))
+                        )
+                        # Check if already muted by looking at aria-label
+                        aria_label = mic_btn.get_attribute('aria-label') or ''
+                        if 'turn on' not in aria_label.lower():
+                            # Microphone is on, click to mute it
+                            mic_btn.click()
+                            logger.info("✅ Microphone muted")
+                            time.sleep(1)
+                        else:
+                            logger.info("✅ Microphone already muted")
+                        break
+                    except:
+                        continue
+
+            except Exception as e:
+                logger.warning(f"⚠️  Microphone control skipped: {e}")
+
             logger.info("📷 Turning off camera...")
             try:
                 camera_selectors = [
+                    (By.CSS_SELECTOR, '[aria-label*="camera" i][aria-label*="turn off" i]'),
                     (By.CSS_SELECTOR, '[aria-label*="camera" i]'),
-                    (By.CSS_SELECTOR, '[data-is-muted="false"]'),
-                    (By.XPATH, '//button[contains(@aria-label, "camera")]'),
+                    (By.XPATH, '//button[contains(@aria-label, "camera") or contains(@aria-label, "Camera")]'),
                 ]
 
                 for by, selector in camera_selectors:
@@ -137,15 +177,21 @@ class GoogleMeetBotSelenium:
                         camera_btn = WebDriverWait(self.driver, 5).until(
                             EC.element_to_be_clickable((by, selector))
                         )
-                        camera_btn.click()
-                        logger.info("✅ Camera turned off")
-                        time.sleep(1)
+                        # Check if already off
+                        aria_label = camera_btn.get_attribute('aria-label') or ''
+                        if 'turn on' not in aria_label.lower():
+                            # Camera is on, click to turn it off
+                            camera_btn.click()
+                            logger.info("✅ Camera turned off")
+                            time.sleep(1)
+                        else:
+                            logger.info("✅ Camera already off")
                         break
                     except:
                         continue
 
             except Exception as e:
-                logger.info(f"📷 Camera control skipped: {e}")
+                logger.warning(f"⚠️  Camera control skipped: {e}")
 
             # Click "Join now" or "Ask to join"
             logger.info("🚪 Joining the meeting...")
@@ -181,9 +227,41 @@ class GoogleMeetBotSelenium:
             # Wait to ensure we've joined
             time.sleep(5)
 
+            # CRITICAL: Double-check microphone is muted after joining
+            logger.info("🔇 Double-checking microphone is muted...")
+            try:
+                # Try to find and mute mic button again (in case it wasn't muted before joining)
+                mic_button = None
+                mic_selectors = [
+                    (By.CSS_SELECTOR, '[aria-label*="Turn off microphone" i]'),
+                    (By.CSS_SELECTOR, '[aria-label*="microphone" i]'),
+                    (By.XPATH, '//button[@aria-label[contains(., "microphone")]]'),
+                ]
+
+                for by, selector in mic_selectors:
+                    try:
+                        mic_button = WebDriverWait(self.driver, 3).until(
+                            EC.presence_of_element_located((by, selector))
+                        )
+                        if mic_button:
+                            aria_label = mic_button.get_attribute('aria-label') or ''
+                            if 'turn off' in aria_label.lower() or 'mute' in aria_label.lower():
+                                # Mic is ON - click to mute it!
+                                mic_button.click()
+                                logger.info("✅ Microphone force-muted after joining")
+                                time.sleep(1)
+                            else:
+                                logger.info("✅ Microphone already muted")
+                            break
+                    except:
+                        continue
+
+            except Exception as e:
+                logger.warning(f"⚠️  Could not verify microphone mute: {e}")
+
             self.is_in_meeting = True
             logger.info(f"✅ Successfully joined meeting!")
-            logger.info(f"🎙️  Bot is now in the meeting")
+            logger.info(f"🎙️  Bot is now in the meeting (MUTED)")
 
             return True
 
