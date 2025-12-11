@@ -230,7 +230,7 @@ class CalendarTool(MCPTool):
                     'dateTime': parameters['end_time'],
                     'timeZone': 'UTC',
                 },
-                'attendees': [{'email': email} for email in parameters.get('attendees', [])],
+                'attendees': [{'email': email} for email in parameters.get('attendees', []) if email and email.strip()],
                 'reminders': {
                     'useDefault': False,
                     'overrides': [

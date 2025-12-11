@@ -55,44 +55,47 @@ class GoogleMeetBotSelenium:
             logger.info(f"🤖 Bot '{self.bot_name}' joining Google Meet: {meeting_url}")
             self.meeting_url = meeting_url
 
-            # Create Chrome options
-            options = uc.ChromeOptions()
+            def create_chrome_options():
+                """Helper to create ChromeOptions (must be fresh for each attempt)."""
+                opts = uc.ChromeOptions()
 
-            # CRITICAL: Block microphone to prevent echo/feedback
-            # Use fake devices so Google Meet doesn't complain
-            options.add_argument('--use-fake-ui-for-media-stream')
-            options.add_argument('--use-fake-device-for-media-stream')
+                # CRITICAL: Block microphone to prevent echo/feedback
+                # Use fake devices so Google Meet doesn't complain
+                opts.add_argument('--use-fake-ui-for-media-stream')
+                opts.add_argument('--use-fake-device-for-media-stream')
 
-            # Disable actual audio capture
-            options.add_argument('--disable-audio-input')
-            options.add_argument('--mute-audio')
+                # Disable actual audio capture
+                opts.add_argument('--disable-audio-input')
+                opts.add_argument('--mute-audio')
 
-            options.add_argument('--disable-blink-features=AutomationControlled')
-            options.add_argument('--autoplay-policy=no-user-gesture-required')
+                opts.add_argument('--disable-blink-features=AutomationControlled')
+                opts.add_argument('--autoplay-policy=no-user-gesture-required')
 
-            # Make it look more like a real browser
-            options.add_argument('--disable-dev-shm-usage')
-            options.add_argument('--no-sandbox')
-            options.add_argument('--window-size=1920,1080')
+                # Make it look more like a real browser
+                opts.add_argument('--disable-dev-shm-usage')
+                opts.add_argument('--no-sandbox')
+                opts.add_argument('--window-size=1920,1080')
 
-            # Set preferences - Allow camera/mic permissions but we'll mute in UI
-            prefs = {
-                "profile.default_content_setting_values.media_stream_mic": 1,
-                "profile.default_content_setting_values.media_stream_camera": 1,
-                "profile.default_content_setting_values.notifications": 1,
-            }
-            options.add_experimental_option("prefs", prefs)
+                # Set preferences - Allow camera/mic permissions but we'll mute in UI
+                prefs = {
+                    "profile.default_content_setting_values.media_stream_mic": 1,
+                    "profile.default_content_setting_values.media_stream_camera": 1,
+                    "profile.default_content_setting_values.notifications": 1,
+                }
+                opts.add_experimental_option("prefs", prefs)
+                return opts
 
             logger.info("🌐 Launching Chrome browser...")
 
             # Create undetected Chrome driver
             # Let undetected-chromedriver auto-detect Chrome version
             try:
-                self.driver = uc.Chrome(options=options, use_subprocess=True)
+                self.driver = uc.Chrome(options=create_chrome_options(), use_subprocess=True)
             except Exception as e:
                 logger.error(f"Failed to launch Chrome with auto-detection: {e}")
                 logger.info("Trying with version_main=142...")
-                self.driver = uc.Chrome(options=options, version_main=142, use_subprocess=True)
+                # Create fresh options for retry (cannot reuse ChromeOptions)
+                self.driver = uc.Chrome(options=create_chrome_options(), version_main=142, use_subprocess=True)
 
             # Navigate to meeting
             logger.info("📍 Opening Google Meet URL...")

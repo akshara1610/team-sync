@@ -124,12 +124,13 @@ class SelfReflectionAgent:
             logger.error(f"Error in validation: {e}")
             # Return original with error feedback
             return ReflectionFeedback(
-                is_factually_consistent=False,
-                consistency_issues=[f"Validation error: {str(e)}"],
-                missing_action_items=[],
                 logical_coherence_score=0.0,
-                suggested_improvements=[],
-                approved=False
+                factual_accuracy_score=0.0,
+                completeness_score=0.0,
+                issues_found=[f"Validation error: {str(e)}"],
+                suggestions=[],
+                approved=False,
+                reasoning=f"Error during validation: {str(e)}"
             ), summary
 
     def _perform_validation(
@@ -156,12 +157,13 @@ class SelfReflectionAgent:
         )
 
         feedback = ReflectionFeedback(
-            is_factually_consistent=len(consistency_check) == 0,
-            consistency_issues=consistency_check,
-            missing_action_items=completeness_check,
             logical_coherence_score=coherence_score,
-            suggested_improvements=all_issues,
-            approved=is_approved
+            factual_accuracy_score=1.0 if len(consistency_check) == 0 else 0.5,
+            completeness_score=1.0 if len(completeness_check) == 0 else 0.5,
+            issues_found=all_issues,
+            suggestions=all_issues,
+            approved=is_approved,
+            reasoning=f"Factual consistency: {len(consistency_check) == 0}, Completeness: {len(completeness_check) == 0}"
         )
 
         return feedback
@@ -296,7 +298,7 @@ Score:"""
         """Generate improved version of summary based on feedback."""
 
         summary_text = self._summary_to_text(summary)
-        issues_text = "\n".join(feedback.suggested_improvements)
+        issues_text = "\n".join(feedback.suggestions)
 
         prompt = f"""You are improving a meeting summary based on critical feedback.
 
