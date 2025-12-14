@@ -26,8 +26,6 @@ Unlike traditional "fire-and-forget" AI tools, TeamSync includes a **Self-Reflec
 
 - Factual consistency with source transcripts
 - Completeness of action items
-- Logical coherence of summaries
-- Elimination of hallucinations
 
 ---
 
@@ -171,8 +169,7 @@ python scripts/demo_meeting_bot.py
 - Self-Reflection Agent validates:
   - Factual consistency
   - Completeness of action items
-  - Logical coherence
-- Iterative revision loop (max 3 iterations)
+- Iterative revision loop 
 
 ### Stage 4: Autonomous Execution
 - Action Agent creates Jira tickets via API
@@ -181,43 +178,3 @@ python scripts/demo_meeting_bot.py
 
 ---
 
-
-## Limitations & Future Work
-
-### Current Limitations
-- Requires stable internet for API calls
-- Limited to English language transcription
-- Speaker diarization accuracy depends on audio quality
-
-### Future Enhancements
-- [ ] Multi-language support
-- [ ] Real-time in-meeting Q&A interface
-- [ ] Integration with Slack/Teams
-- [ ] Custom fine-tuned models for domain-specific terminology
-- [ ] Enhanced speaker identification with voice profiles
-
----
-
-
-## Acknowledgments
-
-- **ReAct Framework**: Yao et al. (2023)
-- **RAG**: Lewis et al. (2020)
-- **LangChain**: Chase et al. (2022)
-- **Model Context Protocol**: Anthropic (2024)
-- **WhisperX**: Bain et al. (2023)
-- **pyannote.audio**: Bredin et al. (2020)
-
----
-
-## Contact
-
-For questions or support, please contact:
-
-- Vrinda Ahuja: [vva2113@columbia.edu](mailto:vva2113@columbia.edu)
-- Sachi Kaushik: [sk5476@columbia.edu](mailto:sk5476@columbia.edu)
-- Akshara Pramod: [ap4613@columbia.edu](mailto:ap4613@columbia.edu)
-
----
-
-**Built with ❤️ at Columbia University**
