@@ -44,7 +44,7 @@ class JiraTool(MCPTool):
         self.name_mapping = {
             "vrinda": "vva2113@columbia.edu",
             "akshara": "ap4613@columbia.edu",
-            # Add more mappings as needed
+            "sachi": "sk5476@columbia.edu",
         }
 
     def _resolve_assignee(self, assignee_str: str) -> List[str]:

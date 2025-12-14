@@ -109,11 +109,24 @@ class SelfReflectionAgent:
 
                 # Generate improved version
                 logger.info("Issues found, generating improved version...")
+                logger.info(f"[Reflection] Issues detected:")
+                if feedback.consistency_issues:
+                    for issue in feedback.consistency_issues:
+                        logger.info(f"  ❌ Consistency: {issue}")
+                if feedback.missing_action_items:
+                    for item in feedback.missing_action_items:
+                        logger.info(f"  ❌ Missing: {item}")
+                if feedback.suggested_improvements:
+                    logger.info(f"[Reflection] Suggested improvements:")
+                    for improvement in feedback.suggested_improvements:
+                        logger.info(f"  💡 {improvement}")
+
                 current_summary = self._improve_summary(
                     current_summary,
                     transcript_text,
                     feedback
                 )
+                logger.info("[Reflection] Summary regenerated with improvements")
 
             # Max iterations reached - return with warning
             logger.warning(f"Max iterations ({self.max_iterations}) reached")
@@ -328,12 +341,37 @@ Return the improved summary as JSON with the same structure as the original."""
 
             improved_data = json.loads(content)
 
+            # Track what changed
+            changes = []
+
             # Update summary with improvements (merge with existing)
-            # For simplicity, we'll just update the text fields
             if "executive_summary" in improved_data:
+                if summary.executive_summary != improved_data["executive_summary"]:
+                    changes.append("Executive summary rewritten for clarity")
                 summary.executive_summary = improved_data["executive_summary"]
 
+            # Check for action item changes
+            if "action_items" in improved_data:
+                old_count = len(summary.action_items)
+                new_count = len(improved_data["action_items"])
+                if new_count > old_count:
+                    changes.append(f"Added {new_count - old_count} missing action item(s)")
+                elif new_count < old_count:
+                    changes.append(f"Removed {old_count - new_count} redundant action item(s)")
+
+            # Check for key decision changes
+            if "key_decisions" in improved_data:
+                old_count = len(summary.key_decisions)
+                new_count = len(improved_data["key_decisions"])
+                if new_count > old_count:
+                    changes.append(f"Added {new_count - old_count} missing key decision(s)")
+
             logger.info("Summary improved based on feedback")
+            if changes:
+                logger.info("[Reflection] Specific changes made:")
+                for change in changes:
+                    logger.info(f"  ✓ {change}")
+
             return summary
 
         except Exception as e:

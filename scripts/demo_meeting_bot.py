@@ -130,11 +130,15 @@ async def main():
         meeting_url = input("Enter Google Meet URL: ").strip()
 
         if meeting_url:
-            duration_input = input("Meeting duration in minutes [30]: ").strip()
+            # Ask if they want to use pre-made transcript or record audio
+            use_premade = input("Use pre-made transcript (skip audio recording)? (y/n) [y]: ").strip().lower()
+            use_premade_transcript = use_premade != 'n'  # Default to yes
+
+            duration_input = input("Meeting duration in minutes [1]: ").strip()
             try:
-                duration_minutes = int(duration_input) if duration_input else 30
+                duration_minutes = int(duration_input) if duration_input else 1
             except:
-                duration_minutes = 30
+                duration_minutes = 1
 
             print("\n🤖 Launching bot...")
             bot = GoogleMeetBotSelenium("TeamSync AI Bot")
@@ -144,47 +148,46 @@ async def main():
 
             if success:
                 print("✅ Bot joined successfully!")
-                print(f"🎧 Bot is now listening to the meeting...")
-                print(f"⏱️  Bot will stay for {duration_minutes} minutes")
+
+                if use_premade_transcript:
+                    print(f"📝 Using pre-made transcript (no audio recording)")
+                    print(f"🎭 Bot will stay in meeting for demo purposes")
+                else:
+                    print(f"🎧 Bot is now listening and recording...")
+                    # Start audio recording
+                    print("🎙️  Starting audio recording...")
+                    recording_started = await bot.start_recording()
+
+                    if recording_started:
+                        print("✅ Audio recording active (using BlackHole if configured)")
+                    else:
+                        print("⚠️  Audio recording failed - will use pre-made transcript")
+
+                print(f"⏱️  Bot will stay for {duration_minutes} minute(s)")
                 print("⚠️  Press Ctrl+C to end early")
                 print()
 
-                # Start audio recording
-                print("🎙️  Starting audio recording...")
-                recording_started = await bot.start_recording()
-
-                if recording_started:
-                    print("✅ Audio recording active (using BlackHole if configured)")
-                else:
-                    print("⚠️  Audio recording failed - will use mock transcript")
-
-                print()
-                print("📝 While the bot is in the meeting:")
-                print("   • Chrome window is open (DO NOT close it)")
-                print("   • Bot is capturing the conversation")
-                print("   • Audio is being recorded")
-                print("   • Processing will begin after the meeting ends")
-                print()
-
-                # Stay in meeting for full duration (use async version to allow recording!)
+                # Stay in meeting for duration
                 try:
                     await bot.stay_in_meeting_async(duration_minutes * 60)  # Convert to seconds
-                    print("\n✅ Meeting ended - Bot left the meeting")
+                    print("\n✅ Meeting ended - Bot leaving the meeting...")
+                    bot.leave_meeting()
+                    print("👋 Bot left the meeting")
                 except KeyboardInterrupt:
                     print("\n⏸️  Meeting ended early by user")
                     bot.leave_meeting()
                 finally:
                     # Stop recording if it was started
-                    if recording_started:
+                    if recording_started and not use_premade_transcript:
                         print("\n⏹️  Stopping audio recording...")
                         await bot.stop_recording()
                         print(f"✅ Recording saved: {bot.output_path}")
             else:
-                print("❌ Failed to join. Continuing with mock transcript...")
+                print("❌ Failed to join. Continuing with pre-made transcript...")
         else:
-            print("No URL provided. Using mock transcript for demo...")
+            print("No URL provided. Using pre-made transcript for demo...")
     else:
-        print("Skipping live join. Using mock transcript for demo...\n")
+        print("Skipping live join. Using pre-made transcript for demo...\n")
 
     # Get participant emails
     print("\n📧 Enter participant emails (comma-separated):")
@@ -241,10 +244,10 @@ async def main():
 
     if not transcript:
         # No recording or processing failed - load existing transcript
-        print("\n📝 Loading existing transcript: gmeet_20251209_022911.json")
+        print("\n📝 Loading existing transcript: sprint_planning_20251210.json")
 
         import json
-        transcript_path = Path("data/transcripts/gmeet_20251209_022911.json")
+        transcript_path = Path("data/transcripts/sprint_planning_20251210.json")
 
         if transcript_path.exists():
             with open(transcript_path, 'r') as f:
@@ -257,7 +260,7 @@ async def main():
 
             transcript = TranscriptData(
                 meeting_id=transcript_data['meeting_id'],
-                meeting_title="Training Completion Meeting - BEI & Post Training",
+                meeting_title=transcript_data.get('meeting_title', 'Sprint Planning - New User Integration Pipeline'),
                 start_time=datetime.now() - timedelta(minutes=2),
                 end_time=datetime.now(),
                 segments=segments,

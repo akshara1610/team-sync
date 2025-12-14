@@ -4,7 +4,7 @@ Combines LangGraph state machine workflow with MCP tool execution.
 
 This is the main orchestrator - uses both LangGraph and MCP.
 """
-from typing import Dict, Any, TypedDict, Annotated, Sequence
+from typing import Dict, Any, TypedDict, Annotated, Sequence, Optional
 import operator
 from datetime import datetime
 import uuid
@@ -337,10 +337,19 @@ class TeamSyncOrchestrator:
             for action_item in summary.action_items:
                 if self._is_meeting_action_item(action_item):
                     logger.info(f"[Orchestrator] Found meeting action item: {action_item.title}")
-                    # TODO: Parse meeting details (date, time) from description
-                    # For now, schedule for next week
+
+                    # Try to parse meeting date/time from description
                     from datetime import timedelta
-                    start_time = datetime.utcnow() + timedelta(days=3)  # 3 days from now
+                    parsed_time = self._parse_meeting_datetime(action_item.description)
+
+                    if parsed_time:
+                        start_time = parsed_time
+                        logger.info(f"[Orchestrator] Parsed meeting time: {start_time}")
+                    else:
+                        # Default: 3 days from now
+                        start_time = datetime.utcnow() + timedelta(days=3)
+                        logger.info(f"[Orchestrator] Using default time: 3 days from now")
+
                     end_time = start_time + timedelta(hours=1)
 
                     result = _run_async(self.mcp_server.execute_tool(
@@ -396,7 +405,9 @@ class TeamSyncOrchestrator:
             "schedule meeting",
             "mandatory meeting",
             "attend session",
-            "participate in meeting"
+            "participate in meeting",
+            "follow up",
+            "follow-up"
         ]
 
         title_lower = action_item.title.lower()
@@ -407,6 +418,65 @@ class TeamSyncOrchestrator:
                 return True
 
         return False
+
+    def _parse_meeting_datetime(self, text: str) -> Optional[datetime]:
+        """Parse meeting date/time from natural language text."""
+        import re
+        from datetime import timedelta
+
+        if not text:
+            return None
+
+        text_lower = text.lower()
+
+        # Try to extract day of month (e.g., "12th", "December 12", "Dec 12")
+        day_pattern = r'(\d{1,2})(?:st|nd|rd|th)?'
+        day_match = re.search(day_pattern, text_lower)
+
+        # Try to extract time (e.g., "2 PM", "14:00", "2:00 PM")
+        time_pattern = r'(\d{1,2})(?::(\d{2}))?\s*(am|pm)?'
+        time_match = re.search(time_pattern, text_lower)
+
+        if day_match:
+            day = int(day_match.group(1))
+
+            # Get current date
+            now = datetime.utcnow()
+            year = now.year
+            month = now.month
+
+            # If day is in the past this month, assume next month
+            if day < now.day:
+                month += 1
+                if month > 12:
+                    month = 1
+                    year += 1
+
+            # Parse time (default to 2 PM if not specified)
+            hour = 14  # Default 2 PM
+            minute = 0
+
+            if time_match:
+                hour = int(time_match.group(1))
+                minute = int(time_match.group(2)) if time_match.group(2) else 0
+                am_pm = time_match.group(3)
+
+                # Convert 12-hour to 24-hour
+                if am_pm:
+                    if am_pm == 'pm' and hour != 12:
+                        hour += 12
+                    elif am_pm == 'am' and hour == 12:
+                        hour = 0
+
+            try:
+                parsed_dt = datetime(year, month, day, hour, minute)
+                logger.info(f"[Orchestrator] Parsed date from '{text}': {parsed_dt}")
+                return parsed_dt
+            except ValueError as e:
+                logger.warning(f"[Orchestrator] Invalid date parsed: year={year}, month={month}, day={day}, error={e}")
+                return None
+
+        return None
 
     def _store_node(self, state: MeetingState) -> Dict[str, Any]:
         """Node 7: Store in knowledge base."""

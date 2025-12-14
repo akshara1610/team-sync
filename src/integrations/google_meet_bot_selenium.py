@@ -225,43 +225,11 @@ class GoogleMeetBotSelenium:
                 return False
 
             # Wait to ensure we've joined
-            time.sleep(5)
-
-            # CRITICAL: Double-check microphone is muted after joining
-            logger.info("🔇 Double-checking microphone is muted...")
-            try:
-                # Try to find and mute mic button again (in case it wasn't muted before joining)
-                mic_button = None
-                mic_selectors = [
-                    (By.CSS_SELECTOR, '[aria-label*="Turn off microphone" i]'),
-                    (By.CSS_SELECTOR, '[aria-label*="microphone" i]'),
-                    (By.XPATH, '//button[@aria-label[contains(., "microphone")]]'),
-                ]
-
-                for by, selector in mic_selectors:
-                    try:
-                        mic_button = WebDriverWait(self.driver, 3).until(
-                            EC.presence_of_element_located((by, selector))
-                        )
-                        if mic_button:
-                            aria_label = mic_button.get_attribute('aria-label') or ''
-                            if 'turn off' in aria_label.lower() or 'mute' in aria_label.lower():
-                                # Mic is ON - click to mute it!
-                                mic_button.click()
-                                logger.info("✅ Microphone force-muted after joining")
-                                time.sleep(1)
-                            else:
-                                logger.info("✅ Microphone already muted")
-                            break
-                    except:
-                        continue
-
-            except Exception as e:
-                logger.warning(f"⚠️  Could not verify microphone mute: {e}")
+            time.sleep(3)
 
             self.is_in_meeting = True
             logger.info(f"✅ Successfully joined meeting!")
-            logger.info(f"🎙️  Bot is now in the meeting (MUTED)")
+            logger.info(f"🎙️  Bot is now in the meeting (mic should be muted by Chrome flags)")
 
             return True
 

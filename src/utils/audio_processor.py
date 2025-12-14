@@ -56,6 +56,15 @@ class AudioProcessor:
             self.diarization_pipeline = None
         else:
             try:
+                # Fix PyTorch 2.6+ weights_only issue - add all required safe globals
+                import torch.serialization
+                from pyannote.audio.core.task import Specifications
+
+                torch.serialization.add_safe_globals([
+                    torch.torch_version.TorchVersion,
+                    Specifications
+                ])
+
                 self.diarization_pipeline = Pipeline.from_pretrained(
                     "pyannote/speaker-diarization-3.1",
                     token=self.hf_token
@@ -66,6 +75,7 @@ class AudioProcessor:
                 logger.info("✅ Pyannote pipeline loaded successfully")
             except Exception as e:
                 logger.error(f"Failed to load Pyannote pipeline: {e}")
+                logger.warning("Continuing without speaker diarization - all speakers will be labeled as SPEAKER_00")
                 self.diarization_pipeline = None
 
     def transcribe_audio(self, audio_path: str) -> dict:
