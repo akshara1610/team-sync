@@ -46,7 +46,7 @@ class ListenerAgent:
             try:
                 self.diarization_pipeline = Pipeline.from_pretrained(
                     "pyannote/speaker-diarization",
-                    token=settings.HF_TOKEN
+                    use_auth_token=settings.HF_TOKEN
                 )
             except Exception as e:
                 logger.warning(f"Could not load diarization model: {e}. Speaker diarization will be disabled.")

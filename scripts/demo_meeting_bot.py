@@ -27,6 +27,72 @@ from src.utils.audio_processor import AudioProcessor
 from loguru import logger
 
 
+def generate_meeting_title(segments):
+    """
+    Dynamically generate meeting title based on transcript content.
+
+    Args:
+        segments: List of SpeakerSegment objects
+
+    Returns:
+        Generated meeting title string
+    """
+    # Build transcript text from segments
+    transcript_text = "\n".join([f"{seg.speaker}: {seg.text}" for seg in segments[:10]])  # Use first 10 segments
+
+    try:
+        # Use LLM to generate concise meeting title
+        from src.config import settings
+
+        if settings.LLM_PROVIDER == "openai":
+            from openai import OpenAI
+            client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
+            prompt = f"""Based on this meeting transcript, generate a concise meeting title (5-8 words max) that captures the main topic/agenda.
+Do not include words like "Meeting" or "Discussion" - just the core topic.
+
+Transcript:
+{transcript_text}
+
+Title (5-8 words):"""
+
+            response = client.chat.completions.create(
+                model=settings.SUMMARIZER_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=50
+            )
+            title = response.choices[0].message.content.strip()
+
+        elif settings.LLM_PROVIDER == "gemini":
+            import google.generativeai as genai
+            genai.configure(api_key=settings.GOOGLE_API_KEY)
+            model = genai.GenerativeModel(settings.SUMMARIZER_MODEL)
+
+            prompt = f"""Based on this meeting transcript, generate a concise meeting title (5-8 words max) that captures the main topic/agenda.
+Do not include words like "Meeting" or "Discussion" - just the core topic.
+
+Transcript:
+{transcript_text}
+
+Title (5-8 words):"""
+
+            response = model.generate_content(prompt)
+            title = response.text.strip()
+        else:
+            title = "Team Sync Meeting"
+
+        # Clean up title - remove quotes if present
+        title = title.strip('"\'')
+
+        logger.info(f"Generated meeting title: {title}")
+        return title
+
+    except Exception as e:
+        logger.warning(f"Failed to generate meeting title: {e}. Using default.")
+        return "Team Sync Meeting"
+
+
 def create_mock_transcript(participants):
     """Create realistic mock transcript (simulates what the bot heard)."""
     segments = [
@@ -97,9 +163,12 @@ def create_mock_transcript(participants):
     speaker_mapping = listener.simple_roster_mapping(segments, participants)
     mapped_segments = listener.map_speaker_names(segments, speaker_mapping)
 
+    # Generate dynamic meeting title based on transcript content
+    meeting_title = generate_meeting_title(segments)
+
     transcript = TranscriptData(
         meeting_id=str(uuid.uuid4()),
-        meeting_title="Sprint Planning - API Migration & Performance",
+        meeting_title=meeting_title,
         start_time=datetime.now(),
         end_time=datetime.now() + timedelta(minutes=2),
         segments=mapped_segments,
@@ -216,11 +285,17 @@ async def main():
 
         try:
             audio_processor = AudioProcessor(whisper_model="base")
+
+            # First, transcribe without title (will use temporary title)
             transcript = audio_processor.process_audio_file(
                 audio_path=bot.output_path,
-                meeting_title="Sprint Planning - API Migration & Performance",
+                meeting_title="Processing...",  # Temporary title
                 participants=participants
             )
+
+            # Generate dynamic meeting title based on transcript content
+            meeting_title = generate_meeting_title(transcript.segments)
+            transcript.meeting_title = meeting_title
 
             print(f"✅ Real transcript generated from audio!")
             print(f"   • Meeting: {transcript.meeting_title}")
@@ -258,15 +333,19 @@ async def main():
                 SpeakerSegment(**seg) for seg in transcript_data['segments']
             ]
 
+            # Generate dynamic meeting title based on transcript content
+            meeting_title = generate_meeting_title(segments)
+
             transcript = TranscriptData(
                 meeting_id=transcript_data['meeting_id'],
-                meeting_title=transcript_data.get('meeting_title', 'Sprint Planning - New User Integration Pipeline'),
+                meeting_title=meeting_title,
                 start_time=datetime.now() - timedelta(minutes=2),
                 end_time=datetime.now(),
                 segments=segments,
                 participants=transcript_data.get('participants', participants)
             )
             print(f"✅ Loaded transcript with {len(segments)} segments")
+            print(f"   • Generated title: {meeting_title}")
         else:
             print("⚠️  Transcript file not found, using mock transcript...")
             transcript = create_mock_transcript(participants)
